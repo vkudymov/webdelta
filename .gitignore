@@ -1,9 +1,12 @@
 # Dependencies
 node_modules/
+.venv/
 
 # Build output
 dist/
 build/
+.next/
+.playwright-browsers/
 
 # Database
 *.db

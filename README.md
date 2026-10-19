@@ -12,61 +12,56 @@ A tool for tracking changes on web pages.
 
 ## Технический стек / Tech Stack
 
-- **Frontend**: React + Vite + Tailwind CSS
-- **Backend**: Node.js + Express
-- **Database**: SQLite
-- **Diff**: jsdiff library
+- **Frontend**: Next.js + Tailwind CSS
+- **Backend**: Python + FastAPI
+- **Web reading**: Playwright (rendered DOM)
+- **Database**: Supabase (Postgres) (в dev без ключей автоматически используется локальный SQLite fallback)
+- **AI**: OpenAI SDK — короткое объяснение дельты (опционально)
 
-## Установка / Installation
+## Запуск разработки / Dev
 
-### Backend (сервер)
-
-```bash
-cd server
-npm install
-npm start
-```
-
-Сервер запустится на http://localhost:3001
-
-### Frontend (клиент)
+В корне есть скрипт, который делает первый запуск (установка зависимостей) и запускает backend+frontend в отдельных окнах Terminal:
 
 ```bash
-cd client
-npm install
-npm run dev
+./dev.sh
 ```
 
-Клиент запустится на http://localhost:5173
+- Frontend: http://localhost:3000
+- Backend: http://127.0.0.1:8000
+
+## Переменные окружения / Environment
+
+Скопируйте пример и заполните нужные значения:
+
+```bash
+cp .env.example .env
+```
+
+Если `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` не заданы, backend автоматически использует локальный `SQLite` файл `backend/webdelta.dev.db`.
+
+## Supabase schema
+
+SQL схема лежит в `backend/supabase/schema.sql`. Её можно выполнить в Supabase SQL Editor (service role).
 
 ## API Endpoints
 
-- `GET /api/pages/check?url=<url>` - Проверить наличие сохранённой страницы
-- `POST /api/pages/download` - Скачать и сохранить страницу
-- `POST /api/pages/compare` - Сравнить текущую версию с сохранённой
-- `GET /api/pages/list` - Список всех сохранённых страниц
-- `DELETE /api/pages/:id` - Удалить сохранённую страницу
+- `GET /api/pages/check?url=<url>` — проверить наличие сохранённой страницы
+- `POST /api/pages/download` — скачать и сохранить страницу
+- `POST /api/pages/compare` — сравнить текущую версию с сохранённой (в ответе может быть `explanation`)
+- `GET /api/pages/list` — список всех сохранённых страниц
+- `DELETE /api/pages/{id}` — удалить сохранённую страницу
 
 ## Структура проекта / Project Structure
 
 ```
 webdelta/
-├── server/
-│   ├── src/
-│   │   ├── index.js          # Точка входа сервера
-│   │   ├── db.js             # SQLite инициализация
-│   │   ├── routes/
-│   │   │   └── pages.js      # API маршруты
-│   │   └── services/
-│   │       ├── fetcher.js    # Загрузка страниц
-│   │       └── differ.js     # Сравнение текстов
-│   └── package.json
-├── client/
-│   ├── src/
-│   │   ├── App.jsx           # Главный компонент
-│   │   ├── components/       # UI компоненты
-│   │   ├── hooks/            # React хуки
-│   │   └── i18n/             # Локализация (RU/EN)
+├── backend/
+│   ├── app/                  # FastAPI + Playwright + storage layer + agent
+│   ├── requirements.txt
+│   └── supabase/
+│       └── schema.sql
+├── frontend/
+│   ├── src/                  # Next.js App Router UI
 │   └── package.json
 └── README.md
 ```
