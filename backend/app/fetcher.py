@@ -97,10 +97,15 @@ def _extract_text_content(soup: BeautifulSoup) -> str:
 
 
 async def fetch_page_rendered(browser: Browser, url: str) -> dict:
-    ctx = await browser.new_context(user_agent=USER_AGENT, locale="ru-RU")
+    ctx = await browser.new_context(user_agent=USER_AGENT, locale="ru-RU", ignore_https_errors=True)
     page: Page = await ctx.new_page()
     try:
-        await page.goto(url, wait_until="networkidle", timeout=settings.page_timeout_ms)
+        try:
+            await page.goto(url, wait_until="load", timeout=settings.page_timeout_ms)
+        except Exception as exc:
+            if type(exc).__name__ == "TimeoutError":
+                raise TimeoutError("Сайт не ответил за 30 секунд. Страница с этого компьютера не открывается.") from exc
+            raise
         html = await page.content()
         title = (await page.title()) or "Untitled"
     finally:

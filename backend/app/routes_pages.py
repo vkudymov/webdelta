@@ -5,6 +5,7 @@ from fastapi.responses import JSONResponse
 
 from .diffing import compare_attachments, compare_texts, is_text_content_type
 from .fetcher import extract_attachment_links, fetch_attachments, fetch_page_rendered, sanitize_storage_filename
+from .results_store import comparison_snapshot, delete_snapshot, load_snapshot, save_snapshot
 from .schemas import (
     CheckResponse,
     CompareRequest,
@@ -25,6 +26,40 @@ def _repo(request: Request):
 
 def _browser(request: Request):
     return request.app.state.browser
+
+
+async def _persist_snapshot(repo, url: str, snapshot: dict, fetched_attachments: list[dict], existing: dict | None):
+    content = snapshot.get("content") or ""
+    title = snapshot.get("title")
+    if existing:
+        page_id = existing["id"]
+        await repo.update_page(page_id, content, title)
+    else:
+        page_id = await repo.insert_page(url, content, title)
+
+    await repo.delete_attachments(page_id)
+    by_url = {att.get("url"): att for att in fetched_attachments}
+    attachments_to_insert: list[dict] = []
+    for att in snapshot.get("attachments") or []:
+        row = {
+            "url": att.get("url"),
+            "filename": att.get("filename") or "unnamed",
+            "content_type": att.get("content_type"),
+            "size": att.get("size"),
+            "hash": att.get("hash"),
+            "text_content": att.get("text_content"),
+            "storage_path": None,
+        }
+        if not is_text_content_type(row["content_type"]):
+            raw = dict(by_url.get(row["url"]) or {})
+            raw["filename"] = sanitize_storage_filename(row["filename"] or "file")
+            raw["bytes"] = raw.get("bytes") or b""
+            raw["content_type"] = row["content_type"]
+            raw["hash"] = row["hash"]
+            row["storage_path"] = await repo.store_binary_attachment(page_id, raw)
+        attachments_to_insert.append(row)
+    await repo.insert_attachments(page_id, attachments_to_insert)
+    return page_id, len(attachments_to_insert)
 
 
 @router.get("/check", response_model=CheckResponse)
@@ -72,50 +107,25 @@ async def download(body: DownloadRequest, request: Request):
         )
 
     browser = _browser(request)
-    rendered = await fetch_page_rendered(browser, url)
-    attachment_links = extract_attachment_links(rendered["html"], url)
-    current_attachments = await fetch_attachments(attachment_links)
+    try:
+        rendered = await fetch_page_rendered(browser, url)
+        attachment_links = extract_attachment_links(rendered["html"], url)
+        current_attachments = await fetch_attachments(attachment_links)
+    except Exception as exc:
+        return JSONResponse(status_code=500, content={"error": str(exc)})
 
-    if existing:
-        page_id = existing["id"]
-        await repo.update_page(page_id, rendered["content"], rendered["title"])
-        await repo.delete_attachments(page_id)
-        attachments_to_insert: list[dict] = []
-        for att in current_attachments:
-            ct = att.get("content_type")
-            if is_text_content_type(ct):
-                att["storage_path"] = None
-            else:
-                att["filename"] = sanitize_storage_filename(att.get("filename") or "file")
-                att["storage_path"] = await repo.store_binary_attachment(page_id, att)
-            att.pop("bytes", None)
-            attachments_to_insert.append(att)
-        await repo.insert_attachments(page_id, attachments_to_insert)
-        return {
-            "success": True,
-            "message": "Page updated",
-            "pageId": page_id,
-            "attachmentCount": len(attachments_to_insert),
-        }
+    snapshot = comparison_snapshot(url, rendered.get("title"), rendered.get("content"), current_attachments)
+    save_snapshot(url, snapshot)
+    stored = load_snapshot(url)
+    if stored is None:
+        return JSONResponse(status_code=500, content={"error": "Failed to read saved snapshot"})
 
-    page_id = await repo.insert_page(url, rendered["content"], rendered["title"])
-    await repo.delete_attachments(page_id)
-    attachments_to_insert = []
-    for att in current_attachments:
-        ct = att.get("content_type")
-        if is_text_content_type(ct):
-            att["storage_path"] = None
-        else:
-            att["filename"] = sanitize_storage_filename(att.get("filename") or "file")
-            att["storage_path"] = await repo.store_binary_attachment(page_id, att)
-        att.pop("bytes", None)
-        attachments_to_insert.append(att)
-    await repo.insert_attachments(page_id, attachments_to_insert)
+    page_id, attachment_count = await _persist_snapshot(repo, url, stored, current_attachments, existing)
     return {
         "success": True,
-        "message": "Page saved",
+        "message": "Page updated" if existing else "Page saved",
         "pageId": page_id,
-        "attachmentCount": len(attachments_to_insert),
+        "attachmentCount": attachment_count,
     }
 
 
@@ -132,7 +142,20 @@ async def compare(body: CompareRequest, request: Request):
     if not saved:
         return JSONResponse(status_code=404, content={"error": "No saved version found for this URL"})
 
-    saved_attachments = await repo.list_attachments(saved["id"])
+    snapshot = load_snapshot(url)
+    if snapshot is None:
+        saved_attachments = await repo.list_attachments(saved["id"])
+        snapshot = comparison_snapshot(
+            url,
+            saved.get("title"),
+            saved.get("content"),
+            saved_attachments,
+            fetched_at=saved.get("updated_at"),
+        )
+        save_snapshot(url, snapshot)
+        snapshot = load_snapshot(url)
+        if snapshot is None:
+            return JSONResponse(status_code=500, content={"error": "Failed to read saved snapshot"})
 
     browser = _browser(request)
     current = await fetch_page_rendered(browser, url)
@@ -141,8 +164,8 @@ async def compare(body: CompareRequest, request: Request):
     for a in current_attachments:
         a.pop("bytes", None)
 
-    text_diff = compare_texts(saved.get("content") or "", current.get("content") or "")
-    attachment_diffs = compare_attachments(saved_attachments, current_attachments)
+    text_diff = compare_texts(snapshot.get("content") or "", current.get("content") or "")
+    attachment_diffs = compare_attachments(snapshot.get("attachments") or [], current_attachments)
 
     summary = {
         "textChanged": bool(text_diff.get("hasChanges")),
@@ -154,9 +177,9 @@ async def compare(body: CompareRequest, request: Request):
 
     comparison = {
         "url": url,
-        "savedTitle": saved.get("title"),
+        "savedTitle": snapshot.get("title"),
         "currentTitle": current.get("title"),
-        "savedAt": saved.get("updated_at"),
+        "savedAt": snapshot.get("fetchedAt") or saved.get("updated_at"),
         "textDiff": text_diff,
         "attachmentDiffs": attachment_diffs,
         "summary": summary,
@@ -189,6 +212,10 @@ async def list_pages_alias(request: Request):
 @router.delete("/{page_id}")
 async def delete(page_id: str, request: Request):
     repo = _repo(request)
+    page = await repo.get_page_by_id(page_id)
+    if not page:
+        return JSONResponse(status_code=404, content={"error": "Page not found"})
+    delete_snapshot(page["url"])
     await repo.delete_attachments(page_id)
     ok = await repo.delete_page(page_id)
     if not ok:

@@ -18,7 +18,11 @@ async def lifespan(app: FastAPI):
     app.state.repo = repo
 
     pw = await async_playwright().start()
-    browser = await pw.chromium.launch(headless=settings.playwright_headless)
+    channel = settings.playwright_channel.strip()
+    if channel:
+        browser = await pw.chromium.launch(channel=channel, headless=settings.playwright_headless)
+    else:
+        browser = await pw.chromium.launch(headless=settings.playwright_headless)
     app.state.playwright = pw
     app.state.browser = browser
 

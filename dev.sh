@@ -104,6 +104,7 @@ ensure_backend_deps
 ensure_playwright
 ensure_frontend_deps
 
+echo "Backend открывает страницы через Google Chrome Beta, не через встроенный Chromium."
 echo "Открываю backend и frontend в отдельных окнах Terminal..."
 
 if port_busy 8000; then

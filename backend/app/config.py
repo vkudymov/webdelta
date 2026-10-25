@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     # Storage backend: "supabase" or "sqlite"
     storage_backend: str = "supabase"
     sqlite_path: str = str(ROOT_DIR / "backend" / "webdelta.dev.db")
+    results_dir: str = str(ROOT_DIR / "results")
 
     # Supabase
     supabase_url: str | None = None
@@ -33,7 +34,9 @@ class Settings(BaseSettings):
     openai_api_key: str | None = None
     openai_model: str = "gpt-4.1-mini"
 
-    # Playwright
+    # Playwright. chrome-beta — установленный Google Chrome Beta, его можно
+    # исключить в Surfshark как приложение. Пустая строка оставляет встроенный Chromium.
+    playwright_channel: str = "chrome-beta"
     playwright_headless: bool = True
     page_timeout_ms: int = 30_000
     attachment_timeout_ms: int = 60_000
