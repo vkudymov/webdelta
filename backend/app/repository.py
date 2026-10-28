@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from supabase import Client, create_client
+from postgrest.exceptions import APIError
 
 from .config import settings
 
@@ -41,13 +42,21 @@ class Repo:
 
     async def delete_page(self, page_id: Any) -> bool: ...
 
-    async def delete_attachments(self, page_id: Any) -> None: ...
+    async def insert_snapshot(self, page_id: Any, captured_at: str, content: str, title: str | None, local_path: str | None) -> Any: ...
 
-    async def insert_attachments(self, page_id: Any, attachments: list[dict]) -> None: ...
+    async def get_snapshot(self, snapshot_id: Any) -> Optional[dict]: ...
 
-    async def list_attachments(self, page_id: Any) -> list[dict]: ...
+    async def list_snapshots(self, page_id: Any) -> list[dict]: ...
 
-    async def store_binary_attachment(self, page_id: Any, att: dict) -> str: ...
+    async def get_latest_snapshot(self, page_id: Any) -> Optional[dict]: ...
+
+    async def delete_attachments(self, snapshot_id: Any) -> None: ...
+
+    async def insert_attachments(self, snapshot_id: Any, attachments: list[dict]) -> None: ...
+
+    async def list_attachments(self, snapshot_id: Any) -> list[dict]: ...
+
+    async def store_binary_attachment(self, page_id: Any, snapshot_id: Any, att: dict) -> str: ...
 
 
 class SqliteRepo(Repo):
@@ -76,9 +85,23 @@ class SqliteRepo(Repo):
             )
             conn.execute(
                 """
-                CREATE TABLE IF NOT EXISTS attachments (
+                CREATE TABLE IF NOT EXISTS snapshots (
                   id INTEGER PRIMARY KEY AUTOINCREMENT,
                   page_id INTEGER NOT NULL,
+                  captured_at TEXT NOT NULL,
+                  content TEXT NOT NULL,
+                  title TEXT,
+                  local_path TEXT,
+                  created_at TEXT NOT NULL,
+                  UNIQUE(page_id, captured_at)
+                );
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS attachments (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  snapshot_id INTEGER NOT NULL,
                   url TEXT NOT NULL,
                   filename TEXT NOT NULL,
                   content_type TEXT,
@@ -87,12 +110,73 @@ class SqliteRepo(Repo):
                   text_content TEXT,
                   storage_path TEXT,
                   created_at TEXT NOT NULL,
-                  UNIQUE(page_id, url)
+                  UNIQUE(snapshot_id, url)
                 );
                 """
             )
             conn.execute("CREATE INDEX IF NOT EXISTS idx_pages_url ON pages(url);")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_attachments_page_id ON attachments(page_id);")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_snapshots_page_id ON snapshots(page_id);")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_attachments_snapshot_id ON attachments(snapshot_id);")
+
+            # One-time migration for older sqlite schema (attachments.page_id, no snapshots).
+            cols = [r["name"] for r in conn.execute("PRAGMA table_info(attachments);").fetchall()]
+            if "page_id" in cols and "snapshot_id" not in cols:
+                now = _utc_now_iso()
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS attachments_v2 (
+                      id INTEGER PRIMARY KEY AUTOINCREMENT,
+                      snapshot_id INTEGER NOT NULL,
+                      url TEXT NOT NULL,
+                      filename TEXT NOT NULL,
+                      content_type TEXT,
+                      size INTEGER,
+                      hash TEXT,
+                      text_content TEXT,
+                      storage_path TEXT,
+                      created_at TEXT NOT NULL,
+                      UNIQUE(snapshot_id, url)
+                    );
+                    """
+                )
+                pages = conn.execute("SELECT * FROM pages").fetchall()
+                for p in pages:
+                    captured_at = p["updated_at"] or now
+                    cur = conn.execute(
+                        "INSERT OR IGNORE INTO snapshots(page_id, captured_at, content, title, local_path, created_at) VALUES(?,?,?,?,?,?)",
+                        (p["id"], captured_at, p["content"], p["title"], None, now),
+                    )
+                    snapshot_id = cur.lastrowid
+                    if not snapshot_id:
+                        row = conn.execute(
+                            "SELECT id FROM snapshots WHERE page_id=? AND captured_at=? LIMIT 1",
+                            (p["id"], captured_at),
+                        ).fetchone()
+                        snapshot_id = row["id"] if row else None
+                    if not snapshot_id:
+                        continue
+                    atts = conn.execute("SELECT * FROM attachments WHERE page_id = ?", (p["id"],)).fetchall()
+                    for a in atts:
+                        conn.execute(
+                            """
+                            INSERT OR IGNORE INTO attachments_v2(snapshot_id, url, filename, content_type, size, hash, text_content, storage_path, created_at)
+                            VALUES(?,?,?,?,?,?,?,?,?)
+                            """,
+                            (
+                                snapshot_id,
+                                a["url"],
+                                a["filename"],
+                                a["content_type"],
+                                a["size"],
+                                a["hash"],
+                                a["text_content"],
+                                a["storage_path"],
+                                a["created_at"] or now,
+                            ),
+                        )
+                conn.execute("DROP TABLE attachments;")
+                conn.execute("ALTER TABLE attachments_v2 RENAME TO attachments;")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_attachments_snapshot_id ON attachments(snapshot_id);")
 
     async def get_page_by_url(self, url: str) -> Optional[dict]:
         with self._conn() as conn:
@@ -106,7 +190,12 @@ class SqliteRepo(Repo):
 
     async def count_attachments(self, page_id: Any) -> int:
         with self._conn() as conn:
-            row = conn.execute("SELECT COUNT(*) AS c FROM attachments WHERE page_id = ?", (page_id,)).fetchone()
+            snap = conn.execute(
+                "SELECT id FROM snapshots WHERE page_id = ? ORDER BY captured_at DESC LIMIT 1", (page_id,)
+            ).fetchone()
+            if not snap:
+                return 0
+            row = conn.execute("SELECT COUNT(*) AS c FROM attachments WHERE snapshot_id = ?", (snap["id"],)).fetchone()
             return int(row["c"]) if row else 0
 
     async def list_pages(self) -> list[dict]:
@@ -114,7 +203,15 @@ class SqliteRepo(Repo):
             rows = conn.execute(
                 """
                 SELECT p.*,
-                       (SELECT COUNT(*) FROM attachments a WHERE a.page_id = p.id) AS attachment_count
+                       (
+                         SELECT COUNT(*) FROM attachments a
+                         WHERE a.snapshot_id = (
+                           SELECT s.id FROM snapshots s
+                           WHERE s.page_id = p.id
+                           ORDER BY s.captured_at DESC
+                           LIMIT 1
+                         )
+                       ) AS attachment_count
                 FROM pages p
                 ORDER BY updated_at DESC
                 """
@@ -140,24 +237,61 @@ class SqliteRepo(Repo):
 
     async def delete_page(self, page_id: Any) -> bool:
         with self._conn() as conn:
+            conn.execute("DELETE FROM attachments WHERE snapshot_id IN (SELECT id FROM snapshots WHERE page_id = ?)", (page_id,))
+            conn.execute("DELETE FROM snapshots WHERE page_id = ?", (page_id,))
             cur = conn.execute("DELETE FROM pages WHERE id = ?", (page_id,))
             return cur.rowcount > 0
 
-    async def delete_attachments(self, page_id: Any) -> None:
+    async def insert_snapshot(self, page_id: Any, captured_at: str, content: str, title: str | None, local_path: str | None) -> Any:
+        now = _utc_now_iso()
         with self._conn() as conn:
-            conn.execute("DELETE FROM attachments WHERE page_id = ?", (page_id,))
+            cur = conn.execute(
+                "INSERT INTO snapshots(page_id, captured_at, content, title, local_path, created_at) VALUES(?,?,?,?,?,?)",
+                (page_id, captured_at, content, title, local_path, now),
+            )
+            return cur.lastrowid
 
-    async def insert_attachments(self, page_id: Any, attachments: list[dict]) -> None:
+    async def get_snapshot(self, snapshot_id: Any) -> Optional[dict]:
+        with self._conn() as conn:
+            row = conn.execute("SELECT * FROM snapshots WHERE id = ?", (snapshot_id,)).fetchone()
+            return dict(row) if row else None
+
+    async def list_snapshots(self, page_id: Any) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT s.*,
+                       (SELECT COUNT(*) FROM attachments a WHERE a.snapshot_id = s.id) AS attachment_count
+                FROM snapshots s
+                WHERE s.page_id = ?
+                ORDER BY s.captured_at DESC
+                """,
+                (page_id,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    async def get_latest_snapshot(self, page_id: Any) -> Optional[dict]:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM snapshots WHERE page_id = ? ORDER BY captured_at DESC LIMIT 1", (page_id,)
+            ).fetchone()
+            return dict(row) if row else None
+
+    async def delete_attachments(self, snapshot_id: Any) -> None:
+        with self._conn() as conn:
+            conn.execute("DELETE FROM attachments WHERE snapshot_id = ?", (snapshot_id,))
+
+    async def insert_attachments(self, snapshot_id: Any, attachments: list[dict]) -> None:
         now = _utc_now_iso()
         with self._conn() as conn:
             for a in attachments:
                 conn.execute(
                     """
-                    INSERT INTO attachments(page_id, url, filename, content_type, size, hash, text_content, storage_path, created_at)
+                    INSERT INTO attachments(snapshot_id, url, filename, content_type, size, hash, text_content, storage_path, created_at)
                     VALUES(?,?,?,?,?,?,?,?,?)
                     """,
                     (
-                        page_id,
+                        snapshot_id,
                         a.get("url"),
                         a.get("filename"),
                         a.get("content_type"),
@@ -169,12 +303,12 @@ class SqliteRepo(Repo):
                     ),
                 )
 
-    async def list_attachments(self, page_id: Any) -> list[dict]:
+    async def list_attachments(self, snapshot_id: Any) -> list[dict]:
         with self._conn() as conn:
-            rows = conn.execute("SELECT * FROM attachments WHERE page_id = ?", (page_id,)).fetchall()
+            rows = conn.execute("SELECT * FROM attachments WHERE snapshot_id = ?", (snapshot_id,)).fetchall()
             return [dict(r) for r in rows]
 
-    async def store_binary_attachment(self, page_id: Any, att: dict) -> str:
+    async def store_binary_attachment(self, page_id: Any, snapshot_id: Any, att: dict) -> str:
         # For sqlite dev mode we don't persist bytes; keep only metadata.
         return att.get("storage_path") or ""
 
@@ -198,7 +332,10 @@ class SupabaseRepo(Repo):
         return data[0] if data else None
 
     async def count_attachments(self, page_id: Any) -> int:
-        res = self.client.table("attachments").select("id", count="exact").eq("page_id", page_id).execute()
+        snap = await self.get_latest_snapshot(page_id)
+        if not snap:
+            return 0
+        res = self.client.table("attachments").select("id", count="exact").eq("snapshot_id", snap["id"]).execute()
         count = getattr(res, "count", None)
         return int(count or 0)
 
@@ -227,17 +364,43 @@ class SupabaseRepo(Repo):
         data = getattr(res, "data", None)
         return bool(data)
 
-    async def delete_attachments(self, page_id: Any) -> None:
-        self.client.table("attachments").delete().eq("page_id", page_id).execute()
+    async def insert_snapshot(self, page_id: Any, captured_at: str, content: str, title: str | None, local_path: str | None) -> Any:
+        payload = {"page_id": page_id, "captured_at": captured_at, "content": content, "title": title, "local_path": local_path}
+        res = self.client.table("snapshots").insert(payload).execute()
+        data = getattr(res, "data", None) or []
+        if not data:
+            raise StorageError("Failed to insert snapshot")
+        return data[0]["id"]
 
-    async def insert_attachments(self, page_id: Any, attachments: list[dict]) -> None:
+    async def get_snapshot(self, snapshot_id: Any) -> Optional[dict]:
+        res = self.client.table("snapshots").select("*").eq("id", snapshot_id).limit(1).execute()
+        data = getattr(res, "data", None) or []
+        return data[0] if data else None
+
+    async def list_snapshots(self, page_id: Any) -> list[dict]:
+        res = self.client.table("snapshots").select("*").eq("page_id", page_id).order("captured_at", desc=True).execute()
+        snaps = getattr(res, "data", None) or []
+        for s in snaps:
+            a = self.client.table("attachments").select("id", count="exact").eq("snapshot_id", s["id"]).execute()
+            s["attachment_count"] = int(getattr(a, "count", None) or 0)
+        return snaps
+
+    async def get_latest_snapshot(self, page_id: Any) -> Optional[dict]:
+        res = self.client.table("snapshots").select("*").eq("page_id", page_id).order("captured_at", desc=True).limit(1).execute()
+        data = getattr(res, "data", None) or []
+        return data[0] if data else None
+
+    async def delete_attachments(self, snapshot_id: Any) -> None:
+        self.client.table("attachments").delete().eq("snapshot_id", snapshot_id).execute()
+
+    async def insert_attachments(self, snapshot_id: Any, attachments: list[dict]) -> None:
         if not attachments:
             return
         payload = []
         for a in attachments:
             payload.append(
                 {
-                    "page_id": page_id,
+                    "snapshot_id": snapshot_id,
                     "url": a.get("url"),
                     "filename": a.get("filename"),
                     "content_type": a.get("content_type"),
@@ -249,16 +412,16 @@ class SupabaseRepo(Repo):
             )
         self.client.table("attachments").insert(payload).execute()
 
-    async def list_attachments(self, page_id: Any) -> list[dict]:
-        res = self.client.table("attachments").select("*").eq("page_id", page_id).execute()
+    async def list_attachments(self, snapshot_id: Any) -> list[dict]:
+        res = self.client.table("attachments").select("*").eq("snapshot_id", snapshot_id).execute()
         return getattr(res, "data", None) or []
 
-    async def store_binary_attachment(self, page_id: Any, att: dict) -> str:
+    async def store_binary_attachment(self, page_id: Any, snapshot_id: Any, att: dict) -> str:
         bucket = self.client.storage.from_(settings.supabase_attachments_bucket)
         filename = att.get("filename") or "file"
         h = att.get("hash") or "hash"
         # avoid collisions
-        path = f"{page_id}/{h}_{filename}"
+        path = f"{page_id}/{snapshot_id}/{h}_{filename}"
         content_type = att.get("content_type") or "application/octet-stream"
         data = att.get("bytes") or b""
         # supabase-py accepts bytes directly
@@ -278,6 +441,18 @@ async def get_repo() -> Repo:
         repo = SqliteRepo(settings.sqlite_path)
         await repo.init()
         return repo
+    # If Supabase schema is not migrated yet (no snapshots table), fall back to sqlite to keep app usable.
+    try:
+        sb.table("snapshots").select("id").limit(1).execute()
+    except APIError:
+        repo = SqliteRepo(settings.sqlite_path)
+        await repo.init()
+        return repo
+    except Exception:
+        repo = SqliteRepo(settings.sqlite_path)
+        await repo.init()
+        return repo
+
     repo = SupabaseRepo(sb)
     await repo.init()
     return repo

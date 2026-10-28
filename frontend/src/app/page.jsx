@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Header from "../components/Header";
 import UrlInput from "../components/UrlInput";
 import ActionButtons from "../components/ActionButtons";
@@ -22,6 +22,8 @@ function AppContent() {
   const [notification, setNotification] = useState(null);
   const [confirmDialog, setConfirmDialog] = useState(null);
   const [pagesRefreshToken, setPagesRefreshToken] = useState(0);
+  const [snapshots, setSnapshots] = useState([]);
+  const [selectedSnapshotId, setSelectedSnapshotId] = useState(null);
 
   const showNotification = (type, message) => {
     setNotification({ type, message });
@@ -36,6 +38,46 @@ function AppContent() {
       return false;
     }
   };
+
+  const refreshSnapshots = async (nextUrl) => {
+    const u = (nextUrl ?? url).trim();
+    if (!u || !validateUrl(u)) {
+      setSnapshots([]);
+      setSelectedSnapshotId(null);
+      return;
+    }
+    const { res, data } = await apiFetch(`/api/pages/snapshots?url=${encodeURIComponent(u)}`);
+    if (!res.ok) return;
+    setSnapshots(data.snapshots || []);
+    setSelectedSnapshotId(null); // default: latest
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    const run = async () => {
+      if (!url.trim() || !validateUrl(url)) {
+        setSnapshots([]);
+        setSelectedSnapshotId(null);
+        return;
+      }
+      try {
+        const { res, data } = await apiFetch(`/api/pages/snapshots?url=${encodeURIComponent(url.trim())}`);
+        if (!res.ok) return;
+        if (cancelled) return;
+        setSnapshots(data.snapshots || []);
+        setSelectedSnapshotId(null); // default: latest
+      } catch {
+        if (cancelled) return;
+        setSnapshots([]);
+        setSelectedSnapshotId(null);
+      }
+    };
+    run();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [url]);
 
   const handleDownload = async (overwrite = false) => {
     if (!url.trim() || !validateUrl(url)) {
@@ -78,6 +120,7 @@ function AppContent() {
       setComparison(null);
       setShowDelta(false);
       setPagesRefreshToken((x) => x + 1);
+      await refreshSnapshots(url);
     } catch (error) {
       showNotification("error", error.message);
     } finally {
@@ -99,7 +142,7 @@ function AppContent() {
       const { res, data } = await apiFetch("/api/pages/compare", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url, locale }),
+        body: JSON.stringify({ url, locale, snapshotId: selectedSnapshotId }),
       });
 
       if (!res.ok) {
@@ -146,6 +189,25 @@ function AppContent() {
       <main className="max-w-6xl mx-auto px-4 py-8">
         <div className="bg-white rounded-2xl shadow-xl p-6 mb-6">
           <UrlInput url={url} onChange={setUrl} disabled={loading} />
+
+          {snapshots.length > 0 && (
+            <div className="mt-4 flex items-center gap-3">
+              <div className="text-sm text-gray-600">{t("snapshotVersion")}:</div>
+              <select
+                className="border rounded-lg px-3 py-2 text-sm bg-white"
+                value={selectedSnapshotId ?? ""}
+                onChange={(e) => setSelectedSnapshotId(e.target.value ? e.target.value : null)}
+                disabled={loading}
+              >
+                <option value="">{t("latestSnapshot")}</option>
+                {snapshots.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.capturedAt ? new Date(s.capturedAt).toLocaleString() : s.id}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
 
           <ActionButtons
             onDownload={() => handleDownload(false)}

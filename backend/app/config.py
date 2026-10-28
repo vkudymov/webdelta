@@ -44,3 +44,15 @@ class Settings(BaseSettings):
 
 settings = Settings()
 
+
+def _resolve_under_root(p: str) -> str:
+    path = Path(p)
+    if path.is_absolute():
+        return str(path)
+    return str((ROOT_DIR / path).resolve())
+
+
+# Allow relative paths in .env (resolve relative to repo root, not process CWD)
+settings.sqlite_path = _resolve_under_root(settings.sqlite_path)
+settings.results_dir = _resolve_under_root(settings.results_dir)
+

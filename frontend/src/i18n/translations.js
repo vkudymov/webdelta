@@ -53,6 +53,8 @@ export const translations = {
     lineModified: "строка изменена",
     attachmentTextChanges: "Изменения текста вложения",
     explanation: "Короткое объяснение",
+    snapshotVersion: "Версия",
+    latestSnapshot: "Последняя",
   },
   en: {
     appTitle: "WebDelta",
@@ -108,6 +110,8 @@ export const translations = {
     lineModified: "line modified",
     attachmentTextChanges: "Attachment text changes",
     explanation: "Short explanation",
+    snapshotVersion: "Version",
+    latestSnapshot: "Latest",
   },
 };
 

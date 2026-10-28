@@ -23,12 +23,14 @@ class DownloadRequest(BaseModel):
 class CompareRequest(BaseModel):
     url: str
     locale: Literal["ru", "en"] = "ru"
+    snapshotId: int | str | None = None
 
 
 class DownloadResponse(BaseModel):
     success: bool = True
     message: str
     pageId: int | str
+    snapshotId: int | str | None = None
     attachmentCount: int = 0
 
 
@@ -113,4 +115,16 @@ class PageListItem(BaseModel):
 
 class ListResponse(BaseModel):
     pages: list[PageListItem]
+
+
+class SnapshotListItem(BaseModel):
+    id: int | str
+    capturedAt: datetime | str | None = None
+    title: str | None = None
+    attachmentCount: int = 0
+
+
+class SnapshotsResponse(BaseModel):
+    url: str
+    snapshots: list[SnapshotListItem] = Field(default_factory=list)
 
