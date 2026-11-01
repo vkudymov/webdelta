@@ -34,6 +34,12 @@ class Settings(BaseSettings):
     openai_api_key: str | None = None
     openai_model: str = "gpt-4.1-mini"
 
+    # Post analyzer (delta explainer): provider switch
+    analyzer_provider: str = "openai"  # "openai" | "lmstudio"
+    # Only from env (no hardcode): required when analyzer_provider=lmstudio
+    post_analyzer_llm_model: str | None = None
+    post_analyzer_openai_base_url: str | None = None
+
     # Playwright. chrome-beta — установленный Google Chrome Beta, его можно
     # исключить в Surfshark как приложение. Пустая строка оставляет встроенный Chromium.
     playwright_channel: str = "chrome-beta"

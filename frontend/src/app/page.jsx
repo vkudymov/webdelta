@@ -245,6 +245,7 @@ function AppContent() {
 function StatsPanel({ comparison }) {
   const { t } = useTranslation();
   const explanation = comparison.explanation;
+  const explanationError = comparison.explanationError;
   return (
     <div className="bg-white rounded-2xl shadow-xl p-6 mb-6">
       <h3 className="text-lg font-semibold text-gray-800 mb-4">{t("statistics")}</h3>
@@ -255,6 +256,15 @@ function StatsPanel({ comparison }) {
             <div className="font-medium text-indigo-900">{t("explanation")}</div>
           </div>
           <div className="p-4 text-sm text-gray-800 whitespace-pre-wrap">{explanation}</div>
+        </div>
+      )}
+
+      {!explanation && explanationError && (
+        <div className="mb-5 border rounded-xl overflow-hidden">
+          <div className="bg-red-50 px-4 py-3 border-b">
+            <div className="font-medium text-red-900">{t("explanation")}</div>
+          </div>
+          <div className="p-4 text-sm text-red-800 whitespace-pre-wrap">{explanationError}</div>
         </div>
       )}
 

@@ -97,6 +97,7 @@ class ComparisonPayload(BaseModel):
     attachmentDiffs: AttachmentDiffs
     summary: ComparisonSummary
     explanation: str | None = None
+    explanationError: str | None = None
 
 
 class CompareResponse(BaseModel):

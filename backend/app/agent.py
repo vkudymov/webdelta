@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any, Dict, Optional
 
@@ -55,10 +56,29 @@ def _compact_comparison(comparison: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def build_explainer() -> Optional[callable]:
-    if not settings.openai_api_key:
-        return None
+    provider = (settings.analyzer_provider or "openai").strip().lower()
 
-    client = AsyncOpenAI(api_key=settings.openai_api_key)
+    if provider == "openai":
+        if not settings.openai_api_key:
+            return None
+        client = AsyncOpenAI(api_key=settings.openai_api_key)
+        model = settings.openai_model
+        temperature = 0.2
+    elif provider == "lmstudio":
+        base_url = (settings.post_analyzer_openai_base_url or "").strip()
+        model = (settings.post_analyzer_llm_model or "").strip()
+        if not base_url or not model:
+            async def explain_delta(_comparison: Dict[str, Any], _locale: str = "ru") -> Optional[str]:
+                raise RuntimeError(
+                    "Analyzer misconfigured. Set POST_ANALYZER_OPENAI_BASE_URL and POST_ANALYZER_LLM_MODEL."
+                )
+
+            return explain_delta
+        # LM Studio is OpenAI-compatible; it doesn't require a key, but SDK expects a non-empty string.
+        client = AsyncOpenAI(api_key="lm-studio", base_url=base_url)
+        temperature = 0.0
+    else:
+        return None
 
     async def explain_delta(comparison: Dict[str, Any], locale: str = "ru") -> Optional[str]:
         compact = _compact_comparison(comparison)
@@ -73,17 +93,46 @@ def build_explainer() -> Optional[callable]:
 
         user = "Here is the diff payload (JSON):\n" + json.dumps(compact, ensure_ascii=False)
 
-        resp = await client.chat.completions.create(
-            model=settings.openai_model,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            temperature=0.2,
-            max_tokens=250,
-        )
+        # Preflight ping for LM Studio so we can fail fast with a clear message.
+        if provider == "lmstudio":
+            try:
+                ping = await asyncio.wait_for(
+                    client.chat.completions.create(
+                        model=model,
+                        messages=[{"role": "user", "content": "Reply with OK."}],
+                        temperature=0.0,
+                        max_tokens=4,
+                    ),
+                    timeout=2.0,
+                )
+                ping_text = (ping.choices[0].message.content or "").strip()
+                if not ping_text:
+                    raise RuntimeError("Empty response")
+            except Exception as exc:
+                raise RuntimeError(
+                    "LM Studio не запущен или модель не загружена. "
+                    "Запустите LM Studio, загрузите модель и повторите."
+                ) from exc
+
+        try:
+            resp = await asyncio.wait_for(
+                client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user},
+                    ],
+                    temperature=temperature,
+                    max_tokens=250,
+                ),
+                timeout=30.0 if provider == "lmstudio" else 60.0,
+            )
+        except asyncio.TimeoutError as exc:
+            raise RuntimeError("Модель не ответила за лимит времени.") from exc
         text = (resp.choices[0].message.content or "").strip()
-        return text or None
+        if not text:
+            raise RuntimeError("Empty model response")
+        return text
 
     return explain_delta
 

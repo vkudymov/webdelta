@@ -335,8 +335,10 @@ async def compare(body: CompareRequest, request: Request):
     if explain:
         try:
             comparison["explanation"] = await explain(comparison, locale=body.locale)
-        except Exception:
+        except Exception as exc:
             comparison["explanation"] = None
+            msg = str(exc).strip() or type(exc).__name__
+            comparison["explanationError"] = msg[:500]
 
     return {"success": True, "comparison": comparison}
 
