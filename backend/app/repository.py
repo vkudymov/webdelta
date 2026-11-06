@@ -81,6 +81,15 @@ class SupabaseRepo(Repo):
         text = str(exc)
         return "url_history" in text and ("PGRST205" in text or "schema cache" in text)
 
+    def _missing_column_key(self, exc: Exception, payload: dict) -> str | None:
+        text = str(exc)
+        if "PGRST204" not in text:
+            return None
+        for key in payload:
+            if f"'{key}' column" in text:
+                return key
+        return None
+
     async def get_page_by_url(self, url: str) -> Optional[dict]:
         res = self.client.table("pages").select("*").eq("url", url).limit(1).execute()
         data = getattr(res, "data", None) or []
@@ -135,7 +144,14 @@ class SupabaseRepo(Repo):
                 "check_name": check_name if check_name is not None else current.get("check_name"),
                 "updated_at": now,
             }
-            res = self.client.table("url_history").update(payload).eq("url", url).execute()
+            try:
+                res = self.client.table("url_history").update(payload).eq("url", url).execute()
+            except APIError as exc:
+                missing = self._missing_column_key(exc, payload)
+                if not missing:
+                    raise
+                payload.pop(missing, None)
+                res = self.client.table("url_history").update(payload).eq("url", url).execute()
             data = getattr(res, "data", None) or []
             return data[0]["id"] if data else current.get("id")
         payload = {
@@ -149,7 +165,14 @@ class SupabaseRepo(Repo):
             "created_at": now,
             "updated_at": now,
         }
-        res = self.client.table("url_history").insert(payload).execute()
+        try:
+            res = self.client.table("url_history").insert(payload).execute()
+        except APIError as exc:
+            missing = self._missing_column_key(exc, payload)
+            if not missing:
+                raise
+            payload.pop(missing, None)
+            res = self.client.table("url_history").insert(payload).execute()
         data = getattr(res, "data", None) or []
         if not data:
             raise StorageError("Failed to insert url_history")
@@ -189,8 +212,17 @@ class SupabaseRepo(Repo):
         return bool(data)
 
     async def insert_page(self, url: str, content: str, title: str | None, check_name: str | None = None) -> Any:
-        payload = {"url": url, "content": content, "title": title, "check_name": check_name}
-        res = self.client.table("pages").insert(payload).execute()
+        payload = {"url": url, "content": content, "title": title}
+        if check_name is not None:
+            payload["check_name"] = check_name
+        try:
+            res = self.client.table("pages").insert(payload).execute()
+        except APIError as exc:
+            missing = self._missing_column_key(exc, payload)
+            if not missing:
+                raise
+            payload.pop(missing, None)
+            res = self.client.table("pages").insert(payload).execute()
         data = getattr(res, "data", None) or []
         if not data:
             raise StorageError("Failed to insert page")
@@ -200,7 +232,14 @@ class SupabaseRepo(Repo):
         payload = {"content": content, "title": title, "updated_at": datetime.now(timezone.utc).isoformat()}
         if check_name is not None:
             payload["check_name"] = check_name
-        self.client.table("pages").update(payload).eq("id", page_id).execute()
+        try:
+            self.client.table("pages").update(payload).eq("id", page_id).execute()
+        except APIError as exc:
+            missing = self._missing_column_key(exc, payload)
+            if not missing:
+                raise
+            payload.pop(missing, None)
+            self.client.table("pages").update(payload).eq("id", page_id).execute()
 
     async def delete_page(self, page_id: Any) -> bool:
         try:

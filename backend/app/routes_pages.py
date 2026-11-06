@@ -4,7 +4,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from .diffing import compare_attachment_text, compare_texts, is_text_content_type
-from .fetcher import extract_attachment_links, fetch_attachments, fetch_page_rendered, sanitize_storage_filename
+from .fetcher import fetch_page_rendered, sanitize_storage_filename
 from .results_store import (
     comparison_snapshot,
     delete_legacy_snapshot,
@@ -72,52 +72,54 @@ async def _persist_snapshot(
     content = snapshot.get("content") or ""
     title = snapshot.get("title")
     name = normalize_check_name(check_name) or normalize_check_name(snapshot.get("checkName"))
+    local_count = len(snapshot.get("attachments") or fetched_attachments or [])
     if repo is None:
-        return None, None, len(snapshot.get("attachments") or fetched_attachments or [])
-    if existing:
-        page_id = existing["id"]
-        await repo.update_page(page_id, content, title, check_name=name)
-    else:
-        page_id = await repo.insert_page(url, content, title, check_name=name)
-
-    captured_at = snapshot.get("fetchedAt")
-    local_path = snapshot.get("localPath")
-    snapshot_id = await repo.insert_snapshot(page_id, captured_at, content, title, local_path)
-
-    by_url = {a.get("url"): a for a in fetched_attachments if a.get("url")}
-    attachments_to_insert: list[dict] = []
-    for att in snapshot.get("attachments") or []:
-        ct = att.get("content_type")
-        row = {
-            "url": att.get("url"),
-            "filename": att.get("filename") or "unnamed",
-            "content_type": ct,
-            "size": att.get("size"),
-            "hash": att.get("hash"),
-            "text_content": att.get("text_content"),
-            "storage_path": att.get("path") or att.get("storage_path"),
-        }
-        if is_text_content_type(ct):
-            row["storage_path"] = None
+        return None, None, local_count
+    try:
+        if existing:
+            page_id = existing["id"]
+            await repo.update_page(page_id, content, title, check_name=name)
         else:
-            # Local path (relative under results/<url>/...)
-            if local_path and row["storage_path"]:
-                row["storage_path"] = f"{local_path}/{row['storage_path']}"
+            page_id = await repo.insert_page(url, content, title, check_name=name)
 
-            raw = dict(by_url.get(row["url"]) or {})
-            raw["filename"] = sanitize_storage_filename(row["filename"] or "file")
-            raw["bytes"] = raw.get("bytes") or b""
-            raw["content_type"] = ct
-            raw["hash"] = row["hash"]
-            try:
-                stored_path = await repo.store_binary_attachment(page_id, snapshot_id, raw)
-                row["storage_path"] = stored_path or row["storage_path"]
-            except Exception:
-                # Keep local storage_path if upload is unavailable.
-                row["storage_path"] = row["storage_path"]
-        attachments_to_insert.append(row)
-    await repo.insert_attachments(snapshot_id, attachments_to_insert)
-    return page_id, snapshot_id, len(attachments_to_insert)
+        captured_at = snapshot.get("fetchedAt")
+        local_path = snapshot.get("localPath")
+        snapshot_id = await repo.insert_snapshot(page_id, captured_at, content, title, local_path)
+
+        by_url = {a.get("url"): a for a in fetched_attachments if a.get("url")}
+        attachments_to_insert: list[dict] = []
+        for att in snapshot.get("attachments") or []:
+            ct = att.get("content_type")
+            row = {
+                "url": att.get("url"),
+                "filename": att.get("filename") or "unnamed",
+                "content_type": ct,
+                "size": att.get("size"),
+                "hash": att.get("hash"),
+                "text_content": att.get("text_content"),
+                "storage_path": att.get("path") or att.get("storage_path"),
+            }
+            if is_text_content_type(ct):
+                row["storage_path"] = None
+            else:
+                if local_path and row["storage_path"]:
+                    row["storage_path"] = f"{local_path}/{row['storage_path']}"
+
+                raw = dict(by_url.get(row["url"]) or {})
+                raw["filename"] = sanitize_storage_filename(row["filename"] or "file")
+                raw["bytes"] = raw.get("bytes") or b""
+                raw["content_type"] = ct
+                raw["hash"] = row["hash"]
+                try:
+                    stored_path = await repo.store_binary_attachment(page_id, snapshot_id, raw)
+                    row["storage_path"] = stored_path or row["storage_path"]
+                except Exception:
+                    row["storage_path"] = row["storage_path"]
+            attachments_to_insert.append(row)
+        await repo.insert_attachments(snapshot_id, attachments_to_insert)
+        return page_id, snapshot_id, len(attachments_to_insert)
+    except Exception:
+        return None, None, local_count
 
 
 async def _mark_history(
@@ -137,15 +139,18 @@ async def _mark_history(
             pass
     if repo is None:
         return
-    await repo.upsert_history(
-        url,
-        last_action=action,
-        last_ok=ok,
-        last_error=(error[:500] if error else None),
-        title=title,
-        page_id=page_id,
-        check_name=check_name,
-    )
+    try:
+        await repo.upsert_history(
+            url,
+            last_action=action,
+            last_ok=ok,
+            last_error=(error[:500] if error else None),
+            title=title,
+            page_id=page_id,
+            check_name=check_name,
+        )
+    except Exception:
+        return
 
 
 def _history_item(row: dict) -> dict:
@@ -462,8 +467,7 @@ async def download(body: DownloadRequest, request: Request):
     browser = _browser(request)
     try:
         rendered = await fetch_page_rendered(browser, url)
-        attachment_links = extract_attachment_links(rendered["html"], url)
-        current_attachments = await fetch_attachments(attachment_links)
+        current_attachments = list(rendered.get("attachments") or [])
     except Exception as exc:
         await _mark_history(repo, url, "download", False, error=str(exc), page_id=existing_id, check_name=check_name)
         return JSONResponse(status_code=500, content={"error": str(exc)})
@@ -605,8 +609,7 @@ async def compare(body: CompareRequest, request: Request):
         browser = _browser(request)
         try:
             current = await fetch_page_rendered(browser, url)
-            current_links = extract_attachment_links(current["html"], url)
-            current_attachments = await fetch_attachments(current_links)
+            current_attachments = list(current.get("attachments") or [])
         except Exception as exc:
             await _mark_history(repo, url, "compare", False, error=str(exc), page_id=saved_id, check_name=check_name)
             return JSONResponse(status_code=500, content={"error": str(exc)})

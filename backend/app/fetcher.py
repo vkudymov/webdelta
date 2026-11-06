@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import re
-from dataclasses import dataclass
+import tempfile
+from email.message import EmailMessage
+from pathlib import Path
 from typing import Iterable, Optional
-from urllib.parse import urljoin, urlparse
+from urllib.parse import unquote, urljoin, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
@@ -14,7 +17,8 @@ from .config import settings
 from .diffing import is_text_content_type
 
 
-ATTACHMENT_EXTENSIONS = [
+# Documents and archives only. Images, media, and tracking pixels are not saved.
+DOCUMENT_ATTACHMENT_EXTENSIONS = (
     ".pdf",
     ".doc",
     ".docx",
@@ -27,29 +31,15 @@ ATTACHMENT_EXTENSIONS = [
     ".odt",
     ".ods",
     ".odp",
+    ".csv",
     ".zip",
     ".rar",
     ".7z",
     ".tar",
     ".gz",
-    ".jpg",
-    ".jpeg",
-    ".png",
-    ".gif",
-    ".bmp",
-    ".svg",
-    ".webp",
-    ".mp3",
-    ".mp4",
-    ".avi",
-    ".mov",
-    ".wmv",
-    ".flv",
-    ".webm",
-    ".csv",
-    ".json",
-    ".xml",
-]
+)
+
+_FILENAME_RE = re.compile(r"""filename\*?=(?:UTF-8''|utf-8'')?["']?([^"';]+)""", re.IGNORECASE)
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -108,6 +98,9 @@ async def fetch_page_rendered(browser: Browser, url: str) -> dict:
             raise
         html = await page.content()
         title = (await page.title()) or "Untitled"
+        cookies = await ctx.cookies()
+        attachment_links = extract_attachment_links(html, url)
+        attachments = await _fetch_attachments_playwright(page, attachment_links)
     finally:
         await ctx.close()
 
@@ -118,84 +111,293 @@ async def fetch_page_rendered(browser: Browser, url: str) -> dict:
         title = extracted_title
     content = _extract_text_content(soup)
 
-    return {"content": content, "title": title, "html": html}
+    return {
+        "content": content,
+        "title": title,
+        "html": html,
+        "cookies": cookies,
+        "attachments": attachments,
+        "attachment_links": attachment_links,
+    }
+
+
+def _path_is_document(raw: str) -> bool:
+    path = urlparse(raw).path.lower()
+    return any(path.endswith(ext) for ext in DOCUMENT_ATTACHMENT_EXTENSIONS)
+
+
+def _href_is_document(raw: str) -> bool:
+    parsed = urlparse(raw)
+    path = (parsed.path or "").lower()
+    query = (parsed.query or "").lower()
+    if any(path.endswith(ext) for ext in DOCUMENT_ATTACHMENT_EXTENSIONS):
+        return True
+    if any(ext.strip(".") in query.split("&") or ext in query for ext in DOCUMENT_ATTACHMENT_EXTENSIONS):
+        return True
+    if "action=download" in query:
+        return True
+    stripped = path.rstrip("/")
+    if stripped.endswith("/download") or "/download/" in path:
+        return True
+    return False
+
+
+def _keep_downloaded_file(content_type: str | None, filename: str) -> bool:
+    ct = (content_type or "").lower().split(";")[0].strip()
+    if ct.startswith("text/html"):
+        return False
+    name = (filename or "").lower()
+    if any(name.endswith(ext) for ext in DOCUMENT_ATTACHMENT_EXTENSIONS):
+        return True
+    prefixes = (
+        "application/pdf",
+        "application/msword",
+        "application/vnd.ms-excel",
+        "application/vnd.ms-powerpoint",
+        "application/vnd.openxmlformats-officedocument",
+        "application/vnd.oasis.opendocument",
+        "application/zip",
+        "application/x-zip",
+        "application/x-rar",
+        "application/x-7z-compressed",
+        "application/gzip",
+        "application/octet-stream",
+        "application/rtf",
+        "text/csv",
+        "text/plain",
+        "text/rtf",
+    )
+    return any(ct == p or ct.startswith(p) for p in prefixes)
 
 
 def extract_attachment_links(html: str, base_url: str) -> list[str]:
     soup = BeautifulSoup(html, "lxml")
-    links: set[str] = set()
+    links: list[str] = []
+    seen: set[str] = set()
 
-    def add_abs(raw: str) -> None:
-        try:
-            abs_url = urljoin(base_url, raw)
-            links.add(abs_url)
-        except Exception:
-            return
-
-    for a in soup.select("a[href]"):
+    preferred = soup.select("a.display-files__link[href]")
+    anchors = preferred or soup.select("a[href]")
+    for a in anchors:
         href = (a.get("href") or "").strip()
-        if not href:
+        if not href or href.startswith(("#", "javascript:", "mailto:")):
             continue
-        lower = href.lower()
-        if any(lower.endswith(ext) for ext in ATTACHMENT_EXTENSIONS):
-            add_abs(href)
-
-    for img in soup.select("img[src]"):
-        src = (img.get("src") or "").strip()
-        if not src or src.startswith("data:"):
+        if not _href_is_document(href):
             continue
-        add_abs(src)
+        try:
+            abs_url = urljoin(base_url, href)
+        except Exception:
+            continue
+        if abs_url in seen:
+            continue
+        seen.add(abs_url)
+        links.append(abs_url)
 
-    return list(links)
+    return links
+
+
+def _guess_content_type(filename: str) -> str:
+    lower = (filename or "").lower()
+    mapping = (
+        (".docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+        (".doc", "application/msword"),
+        (".pdf", "application/pdf"),
+        (".xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+        (".xls", "application/vnd.ms-excel"),
+        (".pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation"),
+        (".ppt", "application/vnd.ms-powerpoint"),
+        (".zip", "application/zip"),
+        (".csv", "text/csv"),
+        (".txt", "text/plain"),
+        (".rtf", "application/rtf"),
+    )
+    for ext, content_type in mapping:
+        if lower.endswith(ext):
+            return content_type
+    return "application/octet-stream"
+
+
+async def _locator_for_url(page: Page, target: str):
+    parsed = urlparse(target)
+    candidates = [target]
+    path = parsed.path or ""
+    if parsed.query:
+        candidates.append(f"{path}?{parsed.query}")
+    if path:
+        candidates.append(path)
+    for href in candidates:
+        loc = page.locator(f'a[href="{href}"]').first
+        if await loc.count():
+            return loc
+    leaf = path.rstrip("/").split("/")[-1]
+    if leaf:
+        loc = page.locator(f'a[href*="{leaf}"]').first
+        if await loc.count():
+            return loc
+    return None
+
+
+async def _click_download_one(page: Page, loc, fallback_url: str) -> dict | None:
+    link_title = ""
+    link_ext = ""
+    try:
+        link_title = (await loc.locator("p").first.inner_text()).strip()
+    except Exception:
+        pass
+    try:
+        link_ext = (await loc.locator("span.uppercase").first.inner_text()).strip().lower()
+    except Exception:
+        pass
+    href = (await loc.get_attribute("href")) or fallback_url
+    try:
+        target = urljoin(page.url, href) if href else fallback_url
+    except Exception:
+        target = fallback_url or href
+    try:
+        await loc.scroll_into_view_if_needed()
+        async with page.expect_download(timeout=settings.attachment_timeout_ms) as pending:
+            await loc.click()
+        download = await pending.value
+        suggested = download.suggested_filename or _filename_from_url(target)
+        filename = suggested
+        if link_title:
+            suffix = (link_ext or Path(suggested).suffix.lstrip(".") or "bin").lstrip(".")
+            filename = f"{link_title}.{suffix}"
+        tmp = Path(tempfile.mkstemp()[1])
+        await download.save_as(str(tmp))
+        body = tmp.read_bytes()
+        tmp.unlink(missing_ok=True)
+        content_type = _guess_content_type(filename)
+        if not _keep_downloaded_file(content_type, filename):
+            return None
+        return {
+            "url": target,
+            "filename": filename,
+            "content_type": content_type,
+            "size": len(body),
+            "hash": hashlib.md5(body).hexdigest(),
+            "bytes": body,
+            "text_content": None,
+        }
+    except Exception:
+        return None
+
+
+async def _fetch_attachments_playwright(page: Page, urls: list[str]) -> list[dict]:
+    locators = page.locator("a.display-files__link")
+    count = await locators.count()
+    if count == 0:
+        locators = page.locator('a[href*="action=download"]')
+        count = await locators.count()
+
+    results: list[dict] = []
+    seen: set[str] = set()
+
+    if count > 0:
+        for i in range(count):
+            fallback = urls[i] if i < len(urls) else ""
+            row = await _click_download_one(page, locators.nth(i), fallback)
+            if not row or row["url"] in seen:
+                continue
+            seen.add(row["url"])
+            results.append(row)
+        return results
+
+    for target in list(dict.fromkeys(urls)):
+        loc = await _locator_for_url(page, target)
+        if loc is None:
+            continue
+        row = await _click_download_one(page, loc, target)
+        if not row or row["url"] in seen:
+            continue
+        seen.add(row["url"])
+        results.append(row)
+    return results
 
 
 def _filename_from_url(url: str) -> str:
     try:
         path = urlparse(url).path
-        name = path.split("/")[-1] or "unnamed"
+        name = unquote(path.split("/")[-1] or "") or "unnamed"
         return name
     except Exception:
         return "unnamed"
 
 
-async def fetch_attachments(urls: Iterable[str]) -> list[dict]:
-    attachments: list[dict] = []
-    timeout = httpx.Timeout(timeout=settings.attachment_timeout_ms / 1000.0)
-    async with httpx.AsyncClient(timeout=timeout, headers={"User-Agent": USER_AGENT}, follow_redirects=True) as client:
-        for url in urls:
+def _filename_from_response(url: str, headers) -> str:
+    raw = headers.get("content-disposition") if headers is not None else None
+    if raw:
+        msg = EmailMessage()
+        msg["content-disposition"] = raw
+        name = msg.get_filename()
+        if name:
+            return name
+        match = _FILENAME_RE.search(raw)
+        if match:
+            return unquote(match.group(1).strip())
+    return _filename_from_url(url)
+
+
+async def fetch_attachments(
+    urls: Iterable[str],
+    *,
+    cookies: list[dict] | None = None,
+    referer: str | None = None,
+) -> list[dict]:
+    url_list = list(dict.fromkeys(urls))
+    headers = {"User-Agent": USER_AGENT}
+    if referer:
+        headers["Referer"] = referer
+    if cookies:
+        headers["Cookie"] = "; ".join(
+            f"{c.get('name')}={c.get('value')}" for c in cookies if c.get("name")
+        )
+    timeout = httpx.Timeout(timeout=min(20.0, settings.attachment_timeout_ms / 1000.0))
+    sem = asyncio.Semaphore(6)
+
+    async def _one(client: httpx.AsyncClient, url: str) -> dict | None:
+        async with sem:
             try:
                 r = await client.get(url)
-                if r.status_code < 200 or r.status_code >= 300:
-                    continue
-                content = r.content
-                md5 = hashlib.md5(content).hexdigest()
                 content_type = r.headers.get("content-type") or "application/octet-stream"
-                filename = _filename_from_url(url)
-
+                filename = _filename_from_response(url, r.headers)
+                kept = r.status_code >= 200 and r.status_code < 300 and _keep_downloaded_file(content_type, filename)
+                if not kept:
+                    return None
+                content = r.content
                 text_content: Optional[str] = None
                 if is_text_content_type(content_type):
                     try:
                         text_content = content.decode("utf-8")
                     except Exception:
                         text_content = content.decode("utf-8", errors="ignore")
-
-                attachments.append(
-                    {
-                        "url": url,
-                        "filename": filename,
-                        "content_type": content_type,
-                        "size": len(content),
-                        "hash": md5,
-                        "bytes": content,
-                        "text_content": text_content,
-                    }
-                )
+                return {
+                    "url": url,
+                    "filename": filename,
+                    "content_type": content_type,
+                    "size": len(content),
+                    "hash": hashlib.md5(content).hexdigest(),
+                    "bytes": content,
+                    "text_content": text_content,
+                }
             except Exception:
-                continue
-    return attachments
+                return None
+
+    async with httpx.AsyncClient(timeout=timeout, headers=headers, follow_redirects=True) as client:
+        rows = await asyncio.gather(*[_one(client, u) for u in url_list])
+    return [row for row in rows if row]
 
 
 def sanitize_storage_filename(name: str) -> str:
-    name = re.sub(r"[^a-zA-Z0-9._-]+", "_", name).strip("_")
+    name = (name or "").replace("\n", " ").replace("\r", " ").strip()
+    name = re.sub(r'[/\\:*?"<>|\x00-\x1f]+', "_", name)
+    name = re.sub(r"\s+", " ", name).strip(" .")
+    encoded = name.encode("utf-8")
+    if len(encoded) > 180:
+        stem, dot, ext = name.rpartition(".")
+        if not stem:
+            stem, ext, dot = name, "", ""
+        while stem and len(f"{stem}{dot}{ext}".encode("utf-8")) > 180:
+            stem = stem[:-1]
+        name = f"{stem}{dot}{ext}".strip(" .")
     return name or "file"
 
