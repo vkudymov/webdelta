@@ -44,6 +44,7 @@ class Repo:
         last_error: str | None = None,
         title: str | None = None,
         page_id: Any = None,
+        check_name: str | None = None,
     ) -> Any: ...
 
     async def list_history(self) -> list[dict]: ...
@@ -52,9 +53,9 @@ class Repo:
 
     async def delete_history(self, history_id: Any) -> bool: ...
 
-    async def insert_page(self, url: str, content: str, title: str | None) -> Any: ...
+    async def insert_page(self, url: str, content: str, title: str | None, check_name: str | None = None) -> Any: ...
 
-    async def update_page(self, page_id: Any, content: str, title: str | None) -> None: ...
+    async def update_page(self, page_id: Any, content: str, title: str | None, check_name: str | None = None) -> None: ...
 
     async def delete_page(self, page_id: Any) -> bool: ...
 
@@ -94,6 +95,7 @@ class SqliteRepo(Repo):
                   url TEXT UNIQUE NOT NULL,
                   content TEXT NOT NULL,
                   title TEXT,
+                  check_name TEXT,
                   created_at TEXT NOT NULL,
                   updated_at TEXT NOT NULL
                 );
@@ -136,6 +138,7 @@ class SqliteRepo(Repo):
                   id INTEGER PRIMARY KEY AUTOINCREMENT,
                   url TEXT UNIQUE NOT NULL,
                   title TEXT,
+                  check_name TEXT,
                   last_action TEXT NOT NULL,
                   last_ok INTEGER NOT NULL DEFAULT 0,
                   last_error TEXT,
@@ -150,6 +153,12 @@ class SqliteRepo(Repo):
             conn.execute("CREATE INDEX IF NOT EXISTS idx_attachments_snapshot_id ON attachments(snapshot_id);")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_url_history_url ON url_history(url);")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_url_history_updated_at ON url_history(updated_at);")
+            page_cols = [r["name"] for r in conn.execute("PRAGMA table_info(pages);").fetchall()]
+            if "check_name" not in page_cols:
+                conn.execute("ALTER TABLE pages ADD COLUMN check_name TEXT")
+            history_cols = [r["name"] for r in conn.execute("PRAGMA table_info(url_history);").fetchall()]
+            if "check_name" not in history_cols:
+                conn.execute("ALTER TABLE url_history ADD COLUMN check_name TEXT")
             conn.execute(
                 """
                 INSERT OR IGNORE INTO url_history(url, title, last_action, last_ok, last_error, page_id, created_at, updated_at)
@@ -265,6 +274,7 @@ class SqliteRepo(Repo):
         last_error: str | None = None,
         title: str | None = None,
         page_id: Any = None,
+        check_name: str | None = None,
     ) -> Any:
         now = _utc_now_iso()
         with self._conn() as conn:
@@ -273,7 +283,7 @@ class SqliteRepo(Repo):
                 conn.execute(
                     """
                     UPDATE url_history
-                    SET last_action = ?, last_ok = ?, last_error = ?, title = ?, page_id = ?, updated_at = ?
+                    SET last_action = ?, last_ok = ?, last_error = ?, title = ?, page_id = ?, check_name = ?, updated_at = ?
                     WHERE url = ?
                     """,
                     (
@@ -282,6 +292,7 @@ class SqliteRepo(Repo):
                         last_error,
                         title if title is not None else existing["title"],
                         page_id if page_id is not None else existing["page_id"],
+                        check_name if check_name is not None else existing["check_name"],
                         now,
                         url,
                     ),
@@ -289,10 +300,10 @@ class SqliteRepo(Repo):
                 return existing["id"]
             cur = conn.execute(
                 """
-                INSERT INTO url_history(url, title, last_action, last_ok, last_error, page_id, created_at, updated_at)
-                VALUES(?,?,?,?,?,?,?,?)
+                INSERT INTO url_history(url, title, last_action, last_ok, last_error, page_id, check_name, created_at, updated_at)
+                VALUES(?,?,?,?,?,?,?,?,?)
                 """,
-                (url, title, last_action, 1 if last_ok else 0, last_error, page_id, now, now),
+                (url, title, last_action, 1 if last_ok else 0, last_error, page_id, check_name, now, now),
             )
             return cur.lastrowid
 
@@ -328,22 +339,28 @@ class SqliteRepo(Repo):
             cur = conn.execute("DELETE FROM url_history WHERE id = ?", (history_id,))
             return cur.rowcount > 0
 
-    async def insert_page(self, url: str, content: str, title: str | None) -> Any:
+    async def insert_page(self, url: str, content: str, title: str | None, check_name: str | None = None) -> Any:
         now = _utc_now_iso()
         with self._conn() as conn:
             cur = conn.execute(
-                "INSERT INTO pages(url, content, title, created_at, updated_at) VALUES(?,?,?,?,?)",
-                (url, content, title, now, now),
+                "INSERT INTO pages(url, content, title, check_name, created_at, updated_at) VALUES(?,?,?,?,?,?)",
+                (url, content, title, check_name, now, now),
             )
             return cur.lastrowid
 
-    async def update_page(self, page_id: Any, content: str, title: str | None) -> None:
+    async def update_page(self, page_id: Any, content: str, title: str | None, check_name: str | None = None) -> None:
         now = _utc_now_iso()
         with self._conn() as conn:
-            conn.execute(
-                "UPDATE pages SET content = ?, title = ?, updated_at = ? WHERE id = ?",
-                (content, title, now, page_id),
-            )
+            if check_name is not None:
+                conn.execute(
+                    "UPDATE pages SET content = ?, title = ?, check_name = ?, updated_at = ? WHERE id = ?",
+                    (content, title, check_name, now, page_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE pages SET content = ?, title = ?, updated_at = ? WHERE id = ?",
+                    (content, title, now, page_id),
+                )
 
     async def delete_page(self, page_id: Any) -> bool:
         with self._conn() as conn:
@@ -478,16 +495,21 @@ class SupabaseRepo(Repo):
         last_error: str | None = None,
         title: str | None = None,
         page_id: Any = None,
+        check_name: str | None = None,
     ) -> Any:
         if self._history_sqlite is not None:
-            return await self._history_sqlite.upsert_history(url, last_action, last_ok, last_error, title, page_id)
+            return await self._history_sqlite.upsert_history(
+                url, last_action, last_ok, last_error, title, page_id, check_name
+            )
         now = datetime.now(timezone.utc).isoformat()
         try:
             existing = self.client.table("url_history").select("*").eq("url", url).limit(1).execute()
         except APIError as exc:
             if self._missing_history_table(exc):
                 store = await self.enable_sqlite_history()
-                return await store.upsert_history(url, last_action, last_ok, last_error, title, page_id)
+                return await store.upsert_history(
+                    url, last_action, last_ok, last_error, title, page_id, check_name
+                )
             raise
         rows = getattr(existing, "data", None) or []
         if rows:
@@ -498,6 +520,7 @@ class SupabaseRepo(Repo):
                 "last_error": last_error,
                 "title": title if title is not None else current.get("title"),
                 "page_id": page_id if page_id is not None else current.get("page_id"),
+                "check_name": check_name if check_name is not None else current.get("check_name"),
                 "updated_at": now,
             }
             res = self.client.table("url_history").update(payload).eq("url", url).execute()
@@ -506,6 +529,7 @@ class SupabaseRepo(Repo):
         payload = {
             "url": url,
             "title": title,
+            "check_name": check_name,
             "last_action": last_action,
             "last_ok": last_ok,
             "last_error": last_error,
@@ -561,16 +585,18 @@ class SupabaseRepo(Repo):
         data = getattr(res, "data", None)
         return bool(data)
 
-    async def insert_page(self, url: str, content: str, title: str | None) -> Any:
-        payload = {"url": url, "content": content, "title": title}
+    async def insert_page(self, url: str, content: str, title: str | None, check_name: str | None = None) -> Any:
+        payload = {"url": url, "content": content, "title": title, "check_name": check_name}
         res = self.client.table("pages").insert(payload).execute()
         data = getattr(res, "data", None) or []
         if not data:
             raise StorageError("Failed to insert page")
         return data[0]["id"]
 
-    async def update_page(self, page_id: Any, content: str, title: str | None) -> None:
+    async def update_page(self, page_id: Any, content: str, title: str | None, check_name: str | None = None) -> None:
         payload = {"content": content, "title": title, "updated_at": datetime.now(timezone.utc).isoformat()}
+        if check_name is not None:
+            payload["check_name"] = check_name
         self.client.table("pages").update(payload).eq("id", page_id).execute()
 
     async def delete_page(self, page_id: Any) -> bool:

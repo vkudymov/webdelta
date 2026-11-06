@@ -18,12 +18,15 @@ class CheckResponse(BaseModel):
 class DownloadRequest(BaseModel):
     url: str
     overwrite: bool = False
+    checkName: str | None = None
 
 
 class CompareRequest(BaseModel):
     url: str
     locale: Literal["ru", "en"] = "ru"
     snapshotId: int | str | None = None
+    snapshotId2: int | str | None = None
+    checkName: str | None = None
 
 
 class DownloadResponse(BaseModel):
@@ -105,10 +108,19 @@ class CompareResponse(BaseModel):
     comparison: ComparisonPayload
 
 
+class SnapshotListItem(BaseModel):
+    id: int | str
+    capturedAt: datetime | str | None = None
+    title: str | None = None
+    attachmentCount: int = 0
+    localPath: str | None = None
+
+
 class PageListItem(BaseModel):
     id: int | str
     url: str
     title: str | None = None
+    checkName: str | None = None
     created_at: datetime | str | None = None
     updated_at: datetime | str | None = None
     attachment_count: int = 0
@@ -116,17 +128,11 @@ class PageListItem(BaseModel):
     lastOk: bool | None = None
     lastError: str | None = None
     pageId: int | str | None = None
+    snapshots: list[SnapshotListItem] = Field(default_factory=list)
 
 
 class ListResponse(BaseModel):
     pages: list[PageListItem]
-
-
-class SnapshotListItem(BaseModel):
-    id: int | str
-    capturedAt: datetime | str | None = None
-    title: str | None = None
-    attachmentCount: int = 0
 
 
 class SnapshotsResponse(BaseModel):

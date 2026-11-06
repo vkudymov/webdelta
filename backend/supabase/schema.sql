@@ -6,9 +6,12 @@ create table if not exists public.pages (
   url text not null unique,
   content text not null,
   title text,
+  check_name text,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+alter table public.pages add column if not exists check_name text;
 
 create index if not exists idx_pages_url on public.pages (url);
 
@@ -16,6 +19,7 @@ create table if not exists public.url_history (
   id bigserial primary key,
   url text not null unique,
   title text,
+  check_name text,
   last_action text not null,
   last_ok boolean not null default false,
   last_error text,
@@ -23,6 +27,8 @@ create table if not exists public.url_history (
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+alter table public.url_history add column if not exists check_name text;
 
 create index if not exists idx_url_history_url on public.url_history (url);
 create index if not exists idx_url_history_updated_at on public.url_history (updated_at desc);

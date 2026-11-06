@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import Header from "../components/Header";
 import UrlInput from "../components/UrlInput";
 import ActionButtons from "../components/ActionButtons";
@@ -15,6 +15,7 @@ import { apiFetch } from "../lib/api";
 function AppContent() {
   const { t, locale } = useTranslation();
   const [url, setUrl] = useState("");
+  const [checkName, setCheckName] = useState("");
   const [loading, setLoading] = useState(false);
   const [loadingAction, setLoadingAction] = useState("");
   const [comparison, setComparison] = useState(null);
@@ -22,8 +23,8 @@ function AppContent() {
   const [notification, setNotification] = useState(null);
   const [confirmDialog, setConfirmDialog] = useState(null);
   const [pagesRefreshToken, setPagesRefreshToken] = useState(0);
-  const [snapshots, setSnapshots] = useState([]);
-  const [selectedSnapshotId, setSelectedSnapshotId] = useState(null);
+  const [versionA, setVersionA] = useState(null);
+  const [versionB, setVersionB] = useState(null);
 
   const showNotification = (type, message) => {
     setNotification({ type, message });
@@ -39,45 +40,8 @@ function AppContent() {
     }
   };
 
-  const refreshSnapshots = async (nextUrl) => {
-    const u = (nextUrl ?? url).trim();
-    if (!u || !validateUrl(u)) {
-      setSnapshots([]);
-      setSelectedSnapshotId(null);
-      return;
-    }
-    const { res, data } = await apiFetch(`/api/pages/snapshots?url=${encodeURIComponent(u)}`);
-    if (!res.ok) return;
-    setSnapshots(data.snapshots || []);
-    setSelectedSnapshotId(null); // default: latest
-  };
-
-  useEffect(() => {
-    let cancelled = false;
-    const run = async () => {
-      if (!url.trim() || !validateUrl(url)) {
-        setSnapshots([]);
-        setSelectedSnapshotId(null);
-        return;
-      }
-      try {
-        const { res, data } = await apiFetch(`/api/pages/snapshots?url=${encodeURIComponent(url.trim())}`);
-        if (!res.ok) return;
-        if (cancelled) return;
-        setSnapshots(data.snapshots || []);
-        setSelectedSnapshotId(null); // default: latest
-      } catch {
-        if (cancelled) return;
-        setSnapshots([]);
-        setSelectedSnapshotId(null);
-      }
-    };
-    run();
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [url]);
+  const sameSnapshot = (left, right) =>
+    left != null && right != null && String(left) === String(right);
 
   const handleDownload = async (overwrite = false) => {
     if (!url.trim() || !validateUrl(url)) {
@@ -92,7 +56,7 @@ function AppContent() {
       const { res, data } = await apiFetch("/api/pages/download", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url, overwrite }),
+        body: JSON.stringify({ url, overwrite, checkName: checkName.trim() || null }),
       });
 
       if (res.status === 409 && data.requiresConfirmation) {
@@ -121,7 +85,6 @@ function AppContent() {
       setComparison(null);
       setShowDelta(false);
       setPagesRefreshToken((x) => x + 1);
-      await refreshSnapshots(url);
     } catch (error) {
       setPagesRefreshToken((x) => x + 1);
       showNotification("error", error.message);
@@ -144,7 +107,12 @@ function AppContent() {
       const { res, data } = await apiFetch("/api/pages/compare", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url, locale, snapshotId: selectedSnapshotId }),
+        body: JSON.stringify({
+          url,
+          locale,
+          snapshotId: versionA?.snapshotId ?? null,
+          checkName: checkName.trim() || null,
+        }),
       });
 
       if (!res.ok) {
@@ -177,45 +145,136 @@ function AppContent() {
     }
   };
 
-  const handleShowDelta = () => {
-    if (comparison) setShowDelta(true);
+  const handleShowDelta = async () => {
+    const hasTwoVersions = Boolean(versionA?.snapshotId != null && versionB?.snapshotId != null);
+    if (!hasTwoVersions) {
+      if (comparison) setShowDelta(true);
+      else showNotification("error", t("selectTwoVersions"));
+      return;
+    }
+    if (!url.trim() || !validateUrl(url)) {
+      showNotification("error", t("invalidUrl"));
+      return;
+    }
+
+    setLoading(true);
+    setLoadingAction("delta");
+
+    try {
+      const { res, data } = await apiFetch("/api/pages/compare", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          url: versionA.url || url,
+          locale,
+          snapshotId: versionA.snapshotId,
+          snapshotId2: versionB.snapshotId,
+          checkName: (versionA.checkName || checkName).trim() || null,
+        }),
+      });
+
+      if (!res.ok) {
+        setPagesRefreshToken((x) => x + 1);
+        if (res.status === 404) throw new Error(t("noSavedVersion"));
+        throw new Error(data.error || t("networkError"));
+      }
+
+      setComparison(data.comparison);
+      setShowDelta(true);
+      setPagesRefreshToken((x) => x + 1);
+
+      const summary = data.comparison?.summary;
+      if (
+        data.comparison?.textDiff?.hasChanges ||
+        summary?.attachmentsAdded > 0 ||
+        summary?.attachmentsRemoved > 0 ||
+        summary?.attachmentsModified > 0
+      ) {
+        showNotification("success", t("changesFound"));
+      } else {
+        showNotification("success", t("noChanges"));
+      }
+    } catch (error) {
+      setPagesRefreshToken((x) => x + 1);
+      showNotification("error", error.message);
+    } finally {
+      setLoading(false);
+      setLoadingAction("");
+    }
   };
 
-  const handleSelectPage = (pageUrl) => {
-    setUrl(pageUrl);
+  const fillSiteFields = (page) => {
+    setUrl(page?.url || "");
+    setCheckName(page?.checkName || page?.title || "");
+  };
+
+  const handleSelectPage = (page) => {
+    fillSiteFields(page);
     setComparison(null);
     setShowDelta(false);
+  };
+
+  const handleSelectVersion = (page, snap, checked) => {
+    const next = {
+      url: page.url,
+      checkName: page.checkName || page.title || "",
+      snapshotId: snap.localPath || snap.id,
+    };
+    const isA = versionA && versionA.url === page.url && sameSnapshot(versionA.snapshotId, next.snapshotId);
+    const isB = versionB && versionB.url === page.url && sameSnapshot(versionB.snapshotId, next.snapshotId);
+
+    fillSiteFields(page);
+    setComparison(null);
+    setShowDelta(false);
+
+    if (!checked) {
+      if (isA) {
+        setVersionA(versionB);
+        setVersionB(null);
+      } else if (isB) {
+        setVersionB(null);
+      }
+      return;
+    }
+
+    if (versionA && versionA.url !== page.url) {
+      setVersionA(next);
+      setVersionB(null);
+      return;
+    }
+    if (!versionA) {
+      setVersionA(next);
+      return;
+    }
+    if (!versionB && !sameSnapshot(versionA.snapshotId, next.snapshotId)) {
+      setVersionB(next);
+    }
   };
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 to-blue-50">
       <Header />
 
-      <main className="max-w-7xl mx-auto px-4 py-8 grid grid-cols-1 md:grid-cols-[280px_minmax(0,1fr)] gap-6 items-start">
-        <SavedPages onSelectPage={handleSelectPage} refreshToken={pagesRefreshToken} currentUrl={url} />
+      <main className="max-w-7xl mx-auto px-4 py-8 grid grid-cols-1 md:grid-cols-[320px_minmax(0,1fr)] gap-6 items-start">
+        <SavedPages
+          onSelectPage={handleSelectPage}
+          onSelectVersion={handleSelectVersion}
+          refreshToken={pagesRefreshToken}
+          currentUrl={url}
+          selectedSiteUrl={versionA?.url || versionB?.url}
+          versionAId={versionA?.snapshotId}
+          versionBId={versionB?.snapshotId}
+        />
 
         <div>
           <div className="bg-white rounded-2xl shadow-xl p-6 mb-6">
-            <UrlInput url={url} onChange={setUrl} disabled={loading} />
-
-            {snapshots.length > 0 && (
-              <div className="mt-4 flex items-center gap-3">
-                <div className="text-sm text-gray-600">{t("snapshotVersion")}:</div>
-                <select
-                  className="border rounded-lg px-3 py-2 text-sm bg-white"
-                  value={selectedSnapshotId ?? ""}
-                  onChange={(e) => setSelectedSnapshotId(e.target.value ? e.target.value : null)}
-                  disabled={loading}
-                >
-                  <option value="">{t("latestSnapshot")}</option>
-                  {snapshots.map((s) => (
-                    <option key={s.id} value={s.id}>
-                      {s.capturedAt ? new Date(s.capturedAt).toLocaleString() : s.id}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            )}
+            <UrlInput
+              url={url}
+              onUrlChange={setUrl}
+              checkName={checkName}
+              onCheckNameChange={setCheckName}
+              disabled={loading}
+            />
 
             <ActionButtons
               onDownload={() => handleDownload(false)}
@@ -224,6 +283,7 @@ function AppContent() {
               loading={loading}
               loadingAction={loadingAction}
               hasComparison={!!comparison}
+              hasTwoVersions={Boolean(versionA?.snapshotId != null && versionB?.snapshotId != null)}
             />
           </div>
 

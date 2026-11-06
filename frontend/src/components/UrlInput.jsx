@@ -2,11 +2,24 @@
 
 import { useTranslation } from "../hooks/useTranslation";
 
-export default function UrlInput({ url, onChange, disabled }) {
+export default function UrlInput({ url, onUrlChange, checkName, onCheckNameChange, disabled }) {
   const { t } = useTranslation();
 
   return (
-    <div className="mb-6">
+    <div className="mb-6 space-y-3">
+      <div>
+        <label className="block text-sm font-medium text-gray-700 mb-1">{t("checkNameLabel")}</label>
+        <input
+          type="text"
+          value={checkName}
+          onChange={(e) => onCheckNameChange(e.target.value)}
+          disabled={disabled}
+          placeholder={t("checkNamePlaceholder")}
+          className="w-full px-4 py-3 text-lg border-2 border-gray-200 rounded-xl
+                     focus:border-blue-500 focus:ring-4 focus:ring-blue-100
+                     transition-all outline-none disabled:bg-gray-50 disabled:cursor-not-allowed"
+        />
+      </div>
       <div className="relative">
         <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
           <svg className="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -21,15 +34,14 @@ export default function UrlInput({ url, onChange, disabled }) {
         <input
           type="url"
           value={url}
-          onChange={(e) => onChange(e.target.value)}
+          onChange={(e) => onUrlChange(e.target.value)}
           disabled={disabled}
           placeholder={t("urlPlaceholder")}
-          className="w-full pl-12 pr-4 py-4 text-lg border-2 border-gray-200 rounded-xl 
-                     focus:border-blue-500 focus:ring-4 focus:ring-blue-100 
+          className="w-full pl-12 pr-4 py-4 text-lg border-2 border-gray-200 rounded-xl
+                     focus:border-blue-500 focus:ring-4 focus:ring-blue-100
                      transition-all outline-none disabled:bg-gray-50 disabled:cursor-not-allowed"
         />
       </div>
     </div>
   );
 }
-

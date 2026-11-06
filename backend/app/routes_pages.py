@@ -9,8 +9,11 @@ from .results_store import (
     comparison_snapshot,
     delete_legacy_snapshot,
     delete_snapshot,
+    is_local_snapshot_path,
+    list_local_snapshots,
     load_legacy_snapshot,
     load_snapshot,
+    normalize_check_name,
     read_attachment_bytes,
     save_legacy_snapshot,
     save_snapshot,
@@ -38,14 +41,22 @@ def _browser(request: Request):
     return request.app.state.browser
 
 
-async def _persist_snapshot(repo, url: str, snapshot: dict, fetched_attachments: list[dict], existing: dict | None):
+async def _persist_snapshot(
+    repo,
+    url: str,
+    snapshot: dict,
+    fetched_attachments: list[dict],
+    existing: dict | None,
+    check_name: str | None = None,
+):
     content = snapshot.get("content") or ""
     title = snapshot.get("title")
+    name = normalize_check_name(check_name) or normalize_check_name(snapshot.get("checkName"))
     if existing:
         page_id = existing["id"]
-        await repo.update_page(page_id, content, title)
+        await repo.update_page(page_id, content, title, check_name=name)
     else:
-        page_id = await repo.insert_page(url, content, title)
+        page_id = await repo.insert_page(url, content, title, check_name=name)
 
     captured_at = snapshot.get("fetchedAt")
     local_path = snapshot.get("localPath")
@@ -95,6 +106,7 @@ async def _mark_history(
     error: str | None = None,
     title: str | None = None,
     page_id=None,
+    check_name: str | None = None,
 ):
     await repo.upsert_history(
         url,
@@ -103,6 +115,7 @@ async def _mark_history(
         last_error=(error[:500] if error else None),
         title=title,
         page_id=page_id,
+        check_name=check_name,
     )
 
 
@@ -123,6 +136,231 @@ def _history_item(row: dict) -> dict:
         "lastOk": last_ok,
         "lastError": row.get("last_error") or row.get("lastError"),
         "pageId": row.get("page_id") if row.get("page_id") is not None else row.get("pageId"),
+        "checkName": row.get("check_name") or row.get("checkName"),
+    }
+
+
+def _resolve_check_name(raw: str | None, existing: dict | None = None) -> str | None:
+    name = normalize_check_name(raw)
+    if name:
+        return name
+    if not existing:
+        return None
+    return normalize_check_name(existing.get("check_name") or existing.get("checkName"))
+
+
+def _snapshot_item(row: dict) -> dict:
+    local_path = row.get("local_path") or row.get("localPath")
+    return {
+        "id": row.get("id") if row.get("id") is not None else local_path,
+        "capturedAt": row.get("captured_at") or row.get("capturedAt"),
+        "title": row.get("title"),
+        "attachmentCount": int(row.get("attachment_count") or row.get("attachmentCount") or 0),
+        "localPath": local_path,
+    }
+
+
+def _merge_snapshots(db_rows: list[dict], file_items: list[dict]) -> list[dict]:
+    # Date/time list comes from results/<site>/<date>/<time>/page.json.
+    # DB rows only enrich matching folders so a wrong page_id cannot leak another site.
+    by_path: dict[str, dict] = {}
+    for row in db_rows:
+        item = _snapshot_item(row)
+        path = item.get("localPath")
+        if path:
+            by_path[str(path)] = item
+
+    merged: list[dict] = []
+    for item in file_items:
+        path = str(item.get("localPath") or "")
+        db_item = by_path.get(path) if path else None
+        merged.append(
+            {
+                "id": (db_item or {}).get("id") if db_item and db_item.get("id") is not None else (item.get("id") or path),
+                "capturedAt": item.get("capturedAt") or (db_item or {}).get("capturedAt"),
+                "title": item.get("title") or (db_item or {}).get("title"),
+                "attachmentCount": int(item.get("attachmentCount") or (db_item or {}).get("attachmentCount") or 0),
+                "localPath": path or None,
+            }
+        )
+
+    if not merged:
+        merged = [_snapshot_item(row) for row in db_rows]
+
+    def _sort_key(item: dict) -> str:
+        return str(item.get("capturedAt") or item.get("localPath") or "")
+
+    merged.sort(key=_sort_key, reverse=True)
+    return merged
+
+
+async def _load_saved_snapshot(repo, url: str, snap_row: dict | None, check_name: str | None, *, allow_legacy: bool) -> dict | None:
+    snapshot = None
+    local_path = (snap_row or {}).get("local_path") or (snap_row or {}).get("localPath")
+    if snap_row and local_path:
+        snapshot = load_snapshot(url, local_path=local_path, check_name=check_name)
+    if snapshot is None and allow_legacy:
+        snapshot = load_legacy_snapshot(url, check_name=check_name)
+    if snapshot is None:
+        snapshot = load_snapshot(url, check_name=check_name)
+    if snapshot is not None and local_path:
+        snapshot.setdefault("localPath", local_path)
+    if snapshot is None and snap_row:
+        snapshot = {
+            "url": url,
+            "checkName": check_name,
+            "title": snap_row.get("title"),
+            "content": snap_row.get("content") or "",
+            "fetchedAt": snap_row.get("captured_at"),
+            "localPath": snap_row.get("local_path"),
+            "attachments": [],
+        }
+        try:
+            snapshot["attachments"] = await repo.list_attachments(snap_row["id"])
+        except Exception:
+            snapshot["attachments"] = []
+    return snapshot
+
+
+def _attachment_bytes(url: str, att: dict, local_path: str | None, check_name: str | None) -> bytes | None:
+    data = att.get("bytes")
+    if data:
+        return data
+    rel = att.get("path") or att.get("storage_path")
+    if not rel:
+        return None
+    found = read_attachment_bytes(url, rel, local_path=local_path, check_name=check_name)
+    if found is not None:
+        return found
+    if local_path and rel.startswith(f"{local_path}/"):
+        stripped = rel[len(local_path) + 1 :]
+        found = read_attachment_bytes(url, stripped, local_path=local_path, check_name=check_name)
+        if found is not None:
+            return found
+    return read_attachment_bytes(url, rel, check_name=check_name)
+
+
+def _diff_snapshots(url: str, left: dict, right: dict, check_name: str | None) -> dict:
+    text_diff = compare_texts(left.get("content") or "", right.get("content") or "")
+    saved_attachments = list(left.get("attachments") or [])
+    current_attachments = list(right.get("attachments") or [])
+    saved_map = {a.get("url"): a for a in saved_attachments if a.get("url")}
+    current_map = {a.get("url"): a for a in current_attachments if a.get("url")}
+    left_path = left.get("localPath") or left.get("local_path")
+    right_path = right.get("localPath") or right.get("local_path")
+    name = check_name or left.get("checkName") or right.get("checkName")
+
+    added: list[dict] = []
+    removed: list[dict] = []
+    modified: list[dict] = []
+    unchanged: list[dict] = []
+
+    for att_url, cur in current_map.items():
+        saved_att = saved_map.get(att_url)
+        ct = cur.get("content_type") or cur.get("contentType") or (saved_att.get("content_type") if saved_att else None)
+        if not saved_att:
+            added.append(
+                {
+                    "url": att_url,
+                    "filename": cur.get("filename") or "unnamed",
+                    "contentType": ct,
+                    "size": cur.get("size"),
+                }
+            )
+            continue
+
+        saved_hash = saved_att.get("hash") or ""
+        cur_hash = cur.get("hash") or ""
+        if saved_hash == cur_hash and saved_hash:
+            unchanged.append(
+                {
+                    "url": att_url,
+                    "filename": cur.get("filename") or saved_att.get("filename") or "unnamed",
+                    "contentType": ct,
+                    "size": cur.get("size"),
+                }
+            )
+            continue
+
+        if is_text_content_type(ct):
+            modified.append(
+                {
+                    "url": att_url,
+                    "filename": cur.get("filename") or saved_att.get("filename") or "unnamed",
+                    "contentType": ct,
+                    "oldSize": saved_att.get("size"),
+                    "newSize": cur.get("size"),
+                    "oldHash": saved_att.get("hash"),
+                    "newHash": cur.get("hash"),
+                    "textDiff": compare_attachment_text(saved_att.get("text_content"), cur.get("text_content")),
+                }
+            )
+            continue
+
+        saved_bytes = _attachment_bytes(url, saved_att, left_path, name)
+        cur_bytes = _attachment_bytes(url, cur, right_path, name)
+        if saved_bytes is not None and cur_bytes is not None and saved_bytes == cur_bytes:
+            unchanged.append(
+                {
+                    "url": att_url,
+                    "filename": cur.get("filename") or saved_att.get("filename") or "unnamed",
+                    "contentType": ct,
+                    "size": cur.get("size"),
+                }
+            )
+        elif (saved_bytes is None or cur_bytes is None) and saved_hash == cur_hash and saved_hash:
+            unchanged.append(
+                {
+                    "url": att_url,
+                    "filename": cur.get("filename") or saved_att.get("filename") or "unnamed",
+                    "contentType": ct,
+                    "size": cur.get("size"),
+                }
+            )
+        else:
+            modified.append(
+                {
+                    "url": att_url,
+                    "filename": cur.get("filename") or saved_att.get("filename") or "unnamed",
+                    "contentType": ct,
+                    "oldSize": saved_att.get("size"),
+                    "newSize": cur.get("size"),
+                    "oldHash": saved_att.get("hash"),
+                    "newHash": cur.get("hash"),
+                    "textDiff": None,
+                }
+            )
+
+    for att_url, saved_att in saved_map.items():
+        if att_url not in current_map:
+            removed.append(
+                {
+                    "url": att_url,
+                    "filename": saved_att.get("filename") or "unnamed",
+                    "contentType": saved_att.get("content_type") or saved_att.get("contentType"),
+                    "size": saved_att.get("size"),
+                }
+            )
+
+    for a in current_attachments:
+        a.pop("bytes", None)
+
+    attachment_diffs = {"added": added, "removed": removed, "modified": modified, "unchanged": unchanged}
+    return {
+        "url": url,
+        "savedTitle": left.get("title"),
+        "currentTitle": right.get("title"),
+        "savedAt": left.get("fetchedAt") or left.get("captured_at"),
+        "textDiff": text_diff,
+        "attachmentDiffs": attachment_diffs,
+        "summary": {
+            "textChanged": bool(text_diff.get("hasChanges")),
+            "attachmentsAdded": len(added),
+            "attachmentsRemoved": len(removed),
+            "attachmentsModified": len(modified),
+            "attachmentsUnchanged": len(unchanged),
+        },
+        "explanation": None,
     }
 
 
@@ -163,7 +401,8 @@ async def download(body: DownloadRequest, request: Request):
     repo = _repo(request)
     existing = await repo.get_page_by_url(url)
     existing_id = existing["id"] if existing else None
-    await _mark_history(repo, url, "download", False, page_id=existing_id)
+    check_name = _resolve_check_name(body.checkName, existing)
+    await _mark_history(repo, url, "download", False, page_id=existing_id, check_name=check_name)
 
     browser = _browser(request)
     try:
@@ -171,19 +410,25 @@ async def download(body: DownloadRequest, request: Request):
         attachment_links = extract_attachment_links(rendered["html"], url)
         current_attachments = await fetch_attachments(attachment_links)
     except Exception as exc:
-        await _mark_history(repo, url, "download", False, error=str(exc), page_id=existing_id)
+        await _mark_history(repo, url, "download", False, error=str(exc), page_id=existing_id, check_name=check_name)
         return JSONResponse(status_code=500, content={"error": str(exc)})
 
-    snapshot = comparison_snapshot(url, rendered.get("title"), rendered.get("content"), current_attachments)
-    save_snapshot(url, snapshot, downloaded_attachments=current_attachments)
-    save_legacy_snapshot(url, snapshot)
-    stored = load_snapshot(url)
+    snapshot = comparison_snapshot(
+        url, rendered.get("title"), rendered.get("content"), current_attachments, check_name=check_name
+    )
+    save_snapshot(url, snapshot, downloaded_attachments=current_attachments, check_name=check_name)
+    save_legacy_snapshot(url, snapshot, check_name=check_name)
+    stored = load_snapshot(url, check_name=check_name)
     if stored is None:
-        await _mark_history(repo, url, "download", False, error="Failed to read saved snapshot", page_id=existing_id)
+        await _mark_history(
+            repo, url, "download", False, error="Failed to read saved snapshot", page_id=existing_id, check_name=check_name
+        )
         return JSONResponse(status_code=500, content={"error": "Failed to read saved snapshot"})
 
-    page_id, snapshot_id, attachment_count = await _persist_snapshot(repo, url, stored, current_attachments, existing)
-    await _mark_history(repo, url, "download", True, title=stored.get("title"), page_id=page_id)
+    page_id, snapshot_id, attachment_count = await _persist_snapshot(
+        repo, url, stored, current_attachments, existing, check_name=check_name
+    )
+    await _mark_history(repo, url, "download", True, title=stored.get("title"), page_id=page_id, check_name=check_name)
     return {
         "success": True,
         "message": "Page saved",
@@ -204,184 +449,102 @@ async def compare(body: CompareRequest, request: Request):
     repo = _repo(request)
     saved = await repo.get_page_by_url(url)
     saved_id = saved["id"] if saved else None
-    await _mark_history(repo, url, "compare", False, page_id=saved_id)
-    if not saved:
-        await _mark_history(repo, url, "compare", False, error="No saved version found for this URL")
+    check_name = _resolve_check_name(body.checkName, saved)
+    await _mark_history(repo, url, "compare", False, page_id=saved_id, check_name=check_name)
+
+    two_saved = body.snapshotId is not None and body.snapshotId2 is not None
+    if not saved and not two_saved:
+        await _mark_history(repo, url, "compare", False, error="No saved version found for this URL", check_name=check_name)
         return JSONResponse(status_code=404, content={"error": "No saved version found for this URL"})
 
-    snap_row = None
-    if body.snapshotId is not None:
-        candidate = await repo.get_snapshot(body.snapshotId)
-        if candidate and str(candidate.get("page_id")) == str(saved["id"]):
-            snap_row = candidate
-        else:
-            await _mark_history(repo, url, "compare", False, error="Snapshot not found", page_id=saved_id)
-            return JSONResponse(status_code=404, content={"error": "Snapshot not found"})
+    async def _snap_for(snapshot_id, *, allow_legacy: bool):
+        if snapshot_id is not None:
+            sid = str(snapshot_id).strip()
+            if is_local_snapshot_path(sid):
+                payload = load_snapshot(url, local_path=sid, check_name=check_name)
+                if payload is None:
+                    return None, JSONResponse(status_code=404, content={"error": "Snapshot not found"})
+                payload.setdefault("localPath", sid)
+                return payload, None
+            if not saved:
+                return None, JSONResponse(status_code=404, content={"error": "Snapshot not found"})
+            candidate = await repo.get_snapshot(snapshot_id)
+            if not candidate or str(candidate.get("page_id")) != str(saved["id"]):
+                payload = load_snapshot(url, local_path=sid, check_name=check_name)
+                if payload is None:
+                    return None, JSONResponse(status_code=404, content={"error": "Snapshot not found"})
+                return payload, None
+            payload = await _load_saved_snapshot(repo, url, candidate, check_name, allow_legacy=False)
+            return payload, None
+        if not saved:
+            payload = load_snapshot(url, check_name=check_name)
+            if payload is None and allow_legacy:
+                payload = load_legacy_snapshot(url, check_name=check_name)
+            return payload, None
+        row = await repo.get_latest_snapshot(saved["id"])
+        payload = await _load_saved_snapshot(repo, url, row, check_name, allow_legacy=allow_legacy)
+        return payload, None
+
+    if body.snapshotId2 is not None:
+        if body.snapshotId is None:
+            await _mark_history(
+                repo, url, "compare", False, error="Both snapshot versions are required", page_id=saved_id, check_name=check_name
+            )
+            return JSONResponse(status_code=400, content={"error": "Both snapshot versions are required"})
+        left, err = await _snap_for(body.snapshotId, allow_legacy=False)
+        if err:
+            await _mark_history(
+                repo, url, "compare", False, error="Snapshot not found", page_id=saved_id, check_name=check_name
+            )
+            return err
+        right, err = await _snap_for(body.snapshotId2, allow_legacy=False)
+        if err:
+            await _mark_history(
+                repo, url, "compare", False, error="Snapshot not found", page_id=saved_id, check_name=check_name
+            )
+            return err
+        if left is None or right is None:
+            await _mark_history(
+                repo, url, "compare", False, error="Failed to load saved snapshot", page_id=saved_id, check_name=check_name
+            )
+            return JSONResponse(status_code=500, content={"error": "Failed to load saved snapshot"})
+        comparison = _diff_snapshots(url, left, right, check_name)
     else:
-        snap_row = await repo.get_latest_snapshot(saved["id"])
-    snapshot = None
-    if snap_row and snap_row.get("local_path"):
-        snapshot = load_snapshot(url, local_path=snap_row.get("local_path"))
-    if snapshot is None and body.snapshotId is None:
-        snapshot = load_legacy_snapshot(url)
-    if snapshot is None:
-        snapshot = load_snapshot(url)
-    if snapshot is None and snap_row:
-        # fallback to DB snapshot data (no local files)
-        snapshot = {
-            "url": url,
-            "title": snap_row.get("title"),
-            "content": snap_row.get("content") or "",
-            "fetchedAt": snap_row.get("captured_at"),
-            "localPath": snap_row.get("local_path"),
-            "attachments": [],
-        }
+        if not saved:
+            await _mark_history(
+                repo, url, "compare", False, error="No saved version found for this URL", check_name=check_name
+            )
+            return JSONResponse(status_code=404, content={"error": "No saved version found for this URL"})
+        snapshot, err = await _snap_for(body.snapshotId, allow_legacy=body.snapshotId is None)
+        if err:
+            await _mark_history(
+                repo, url, "compare", False, error="Snapshot not found", page_id=saved_id, check_name=check_name
+            )
+            return err
+        if snapshot is None:
+            await _mark_history(
+                repo, url, "compare", False, error="Failed to load saved snapshot", page_id=saved_id, check_name=check_name
+            )
+            return JSONResponse(status_code=500, content={"error": "Failed to load saved snapshot"})
+
+        browser = _browser(request)
         try:
-            db_atts = await repo.list_attachments(snap_row["id"])
-            snapshot["attachments"] = db_atts
-        except Exception:
-            snapshot["attachments"] = []
-    if snapshot is None:
-        await _mark_history(repo, url, "compare", False, error="Failed to load saved snapshot", page_id=saved_id)
-        return JSONResponse(status_code=500, content={"error": "Failed to load saved snapshot"})
+            current = await fetch_page_rendered(browser, url)
+            current_links = extract_attachment_links(current["html"], url)
+            current_attachments = await fetch_attachments(current_links)
+        except Exception as exc:
+            await _mark_history(repo, url, "compare", False, error=str(exc), page_id=saved_id, check_name=check_name)
+            return JSONResponse(status_code=500, content={"error": str(exc)})
 
-    browser = _browser(request)
-    try:
-        current = await fetch_page_rendered(browser, url)
-        current_links = extract_attachment_links(current["html"], url)
-        current_attachments = await fetch_attachments(current_links)
-    except Exception as exc:
-        await _mark_history(repo, url, "compare", False, error=str(exc), page_id=saved_id)
-        return JSONResponse(status_code=500, content={"error": str(exc)})
-
-    text_diff = compare_texts(snapshot.get("content") or "", current.get("content") or "")
-
-    saved_attachments = list(snapshot.get("attachments") or [])
-    saved_map = {a.get("url"): a for a in saved_attachments if a.get("url")}
-    current_map = {a.get("url"): a for a in current_attachments if a.get("url")}
-
-    added: list[dict] = []
-    removed: list[dict] = []
-    modified: list[dict] = []
-    unchanged: list[dict] = []
-
-    for att_url, cur in current_map.items():
-        saved_att = saved_map.get(att_url)
-        ct = cur.get("content_type") or cur.get("contentType") or (saved_att.get("content_type") if saved_att else None)
-        if not saved_att:
-            added.append(
-                {
-                    "url": att_url,
-                    "filename": cur.get("filename") or "unnamed",
-                    "contentType": ct,
-                    "size": cur.get("size"),
-                }
-            )
-            continue
-
-        saved_hash = (saved_att.get("hash") or "")
-        cur_hash = (cur.get("hash") or "")
-        if saved_hash == cur_hash and saved_hash:
-            unchanged.append(
-                {
-                    "url": att_url,
-                    "filename": cur.get("filename") or saved_att.get("filename") or "unnamed",
-                    "contentType": ct,
-                    "size": cur.get("size"),
-                }
-            )
-            continue
-
-        if is_text_content_type(ct):
-            text_diff_att = compare_attachment_text(saved_att.get("text_content"), cur.get("text_content"))
-            modified.append(
-                {
-                    "url": att_url,
-                    "filename": cur.get("filename") or saved_att.get("filename") or "unnamed",
-                    "contentType": ct,
-                    "oldSize": saved_att.get("size"),
-                    "newSize": cur.get("size"),
-                    "oldHash": saved_att.get("hash"),
-                    "newHash": cur.get("hash"),
-                    "textDiff": text_diff_att,
-                }
-            )
-            continue
-
-        # Binary: compare bytes against the saved copy on disk (source of truth).
-        saved_rel = saved_att.get("path") or saved_att.get("storage_path")
-        saved_bytes = (
-            read_attachment_bytes(url, saved_rel, local_path=snapshot.get("localPath")) if saved_rel else None
-        )
-        cur_bytes = cur.get("bytes") or b""
-        if saved_bytes is not None and saved_bytes == cur_bytes:
-            unchanged.append(
-                {
-                    "url": att_url,
-                    "filename": cur.get("filename") or saved_att.get("filename") or "unnamed",
-                    "contentType": ct,
-                    "size": cur.get("size"),
-                }
-            )
-        elif saved_bytes is None and saved_hash == cur_hash and saved_hash:
-            # No saved file on disk (e.g. legacy snapshot from DB); fall back to hash equality.
-            unchanged.append(
-                {
-                    "url": att_url,
-                    "filename": cur.get("filename") or saved_att.get("filename") or "unnamed",
-                    "contentType": ct,
-                    "size": cur.get("size"),
-                }
-            )
-        else:
-            modified.append(
-                {
-                    "url": att_url,
-                    "filename": cur.get("filename") or saved_att.get("filename") or "unnamed",
-                    "contentType": ct,
-                    "oldSize": saved_att.get("size"),
-                    "newSize": cur.get("size"),
-                    "oldHash": saved_att.get("hash"),
-                    "newHash": cur.get("hash"),
-                    "textDiff": None,
-                }
-            )
-
-    for att_url, saved_att in saved_map.items():
-        if att_url not in current_map:
-            removed.append(
-                {
-                    "url": att_url,
-                    "filename": saved_att.get("filename") or "unnamed",
-                    "contentType": saved_att.get("content_type") or saved_att.get("contentType"),
-                    "size": saved_att.get("size"),
-                }
-            )
-
-    attachment_diffs = {"added": added, "removed": removed, "modified": modified, "unchanged": unchanged}
-
-    # Do not leak bytes in the response.
-    for a in current_attachments:
-        a.pop("bytes", None)
-
-    summary = {
-        "textChanged": bool(text_diff.get("hasChanges")),
-        "attachmentsAdded": len(attachment_diffs["added"]),
-        "attachmentsRemoved": len(attachment_diffs["removed"]),
-        "attachmentsModified": len(attachment_diffs["modified"]),
-        "attachmentsUnchanged": len(attachment_diffs["unchanged"]),
-    }
-
-    comparison = {
-        "url": url,
-        "savedTitle": snapshot.get("title"),
-        "currentTitle": current.get("title"),
-        "savedAt": snapshot.get("fetchedAt") or saved.get("updated_at"),
-        "textDiff": text_diff,
-        "attachmentDiffs": attachment_diffs,
-        "summary": summary,
-        "explanation": None,
-    }
+        right = {
+            "url": url,
+            "checkName": check_name,
+            "title": current.get("title"),
+            "content": current.get("content") or "",
+            "fetchedAt": current.get("fetchedAt"),
+            "attachments": current_attachments,
+        }
+        comparison = _diff_snapshots(url, snapshot, right, check_name)
 
     # Agent explanation (optional, added later by agent module)
     explain = getattr(request.app.state, "explain_delta", None)
@@ -398,8 +561,9 @@ async def compare(body: CompareRequest, request: Request):
         url,
         "compare",
         True,
-        title=current.get("title") or snapshot.get("title"),
+        title=comparison.get("currentTitle") or comparison.get("savedTitle"),
         page_id=saved_id,
+        check_name=check_name,
     )
     return {"success": True, "comparison": comparison}
 
@@ -408,7 +572,20 @@ async def compare(body: CompareRequest, request: Request):
 async def list_pages(request: Request):
     repo = _repo(request)
     rows = await repo.list_history()
-    return {"pages": [_history_item(r) for r in rows]}
+    pages = []
+    for row in rows:
+        item = _history_item(row)
+        page_id = item.get("pageId")
+        db_rows: list[dict] = []
+        if page_id is not None:
+            try:
+                db_rows = await repo.list_snapshots(page_id)
+            except Exception:
+                db_rows = []
+        file_items = list_local_snapshots(item.get("url") or "", item.get("checkName"))
+        item["snapshots"] = _merge_snapshots(db_rows, file_items)
+        pages.append(item)
+    return {"pages": pages}
 
 @router.get("/snapshots", response_model=SnapshotsResponse)
 async def list_snapshots(url: str, request: Request):
@@ -419,21 +596,16 @@ async def list_snapshots(url: str, request: Request):
 
     repo = _repo(request)
     page = await repo.get_page_by_url(url)
-    if not page:
-        return {"url": url, "snapshots": []}
-
-    snapshots = await repo.list_snapshots(page["id"])
-    items = []
-    for s in snapshots:
-        items.append(
-            {
-                "id": s.get("id"),
-                "capturedAt": s.get("captured_at") or s.get("capturedAt"),
-                "title": s.get("title"),
-                "attachmentCount": int(s.get("attachment_count") or s.get("attachmentCount") or 0),
-            }
-        )
-    return {"url": url, "snapshots": items}
+    db_rows: list[dict] = []
+    check_name = None
+    if page:
+        check_name = _resolve_check_name(None, page)
+        try:
+            db_rows = await repo.list_snapshots(page["id"])
+        except Exception:
+            db_rows = []
+    file_items = list_local_snapshots(url, check_name)
+    return {"url": url, "snapshots": _merge_snapshots(db_rows, file_items)}
 
 
 @router.get("", response_model=ListResponse)
@@ -448,8 +620,9 @@ async def delete(page_id: str, request: Request):
     if hist:
         page = await repo.get_page_by_id(hist.get("page_id")) if hist.get("page_id") is not None else None
         if page:
-            delete_snapshot(page["url"])
-            delete_legacy_snapshot(page["url"])
+            check_name = _resolve_check_name(hist.get("check_name") or hist.get("checkName"), page)
+            delete_snapshot(page["url"], check_name=check_name)
+            delete_legacy_snapshot(page["url"], check_name=check_name)
             await repo.delete_page(page["id"])
         await repo.delete_history(hist["id"])
         return {"success": True, "message": "Page deleted"}
@@ -457,8 +630,9 @@ async def delete(page_id: str, request: Request):
     page = await repo.get_page_by_id(page_id)
     if not page:
         return JSONResponse(status_code=404, content={"error": "Page not found"})
-    delete_snapshot(page["url"])
-    delete_legacy_snapshot(page["url"])
+    check_name = _resolve_check_name(None, page)
+    delete_snapshot(page["url"], check_name=check_name)
+    delete_legacy_snapshot(page["url"], check_name=check_name)
     ok = await repo.delete_page(page_id)
     if not ok:
         return JSONResponse(status_code=404, content={"error": "Page not found"})

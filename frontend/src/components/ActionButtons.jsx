@@ -2,7 +2,15 @@
 
 import { useTranslation } from "../hooks/useTranslation";
 
-export default function ActionButtons({ onDownload, onCompare, onShowDelta, loading, loadingAction, hasComparison }) {
+export default function ActionButtons({
+  onDownload,
+  onCompare,
+  onShowDelta,
+  loading,
+  loadingAction,
+  hasComparison,
+  hasTwoVersions,
+}) {
   const { t } = useTranslation();
 
   return (
@@ -27,8 +35,14 @@ export default function ActionButtons({ onDownload, onCompare, onShowDelta, load
         {loading && loadingAction === "compare" ? t("comparing") : t("compareWithOriginal")}
       </Button>
 
-      <Button onClick={onShowDelta} disabled={loading || !hasComparison} variant="accent" icon={<DeltaIcon />}>
-        {t("showDelta")}
+      <Button
+        onClick={onShowDelta}
+        loading={loading && loadingAction === "delta"}
+        disabled={loading || (!hasTwoVersions && !hasComparison)}
+        variant="accent"
+        icon={<DeltaIcon />}
+      >
+        {loading && loadingAction === "delta" ? t("comparing") : t("showDelta")}
       </Button>
     </div>
   );
