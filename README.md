@@ -11,7 +11,7 @@ A tool for tracking changes on web pages.
 
 ## Хранение / Storage
 
-- Снимки страниц **всегда** пишутся в папку `results/<сайт>/<дата>/<время>/` (`page.json`, вложения, `error.json`).
+- Снимки страниц **всегда** пишутся в папку `results/<сайт>/<дата>/<время>/` (`page.json`, вложения, `error.json`). Каталог `results/` **не хранится в Git** (`.gitignore`); это только локальные данные.
 - Текст страницы лежит в `page.json` (`content`). В `files/` сохраняются только документы по ссылкам: PDF, Word, Excel, PowerPoint, ODF, CSV, RTF, TXT и архивы. Картинки и пиксели счётчиков не скачиваются.
 - **Supabase** опционален: если в `.env` заданы `SUPABASE_URL` и `SUPABASE_SERVICE_ROLE_KEY`, те же данные дополнительно пишутся в облачную БД.
 - Без ключей Supabase приложение работает только с файлами.

@@ -2,6 +2,10 @@
 node_modules/
 .venv/
 
+# Python
+__pycache__/
+*.py[cod]
+
 # Build output
 dist/
 build/
@@ -38,3 +42,6 @@ Thumbs.db
 
 # Cache
 .cache/
+
+# Local page snapshots (never commit — содержит скачанные страницы и вложения)
+results/
