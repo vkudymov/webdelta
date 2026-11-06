@@ -520,6 +520,44 @@ def load_snapshot(url: str, local_path: str | None = None, check_name: str | Non
     return found
 
 
+def _prune_empty_parents(folder: Path) -> None:
+    root = Path(settings.results_dir).resolve()
+    current = folder
+    for _ in range(2):
+        parent = current.parent
+        try:
+            parent.resolve().relative_to(root)
+        except Exception:
+            return
+        if parent == root or not parent.is_dir():
+            return
+        try:
+            next(parent.iterdir())
+        except StopIteration:
+            parent.rmdir()
+            current = parent
+            continue
+        return
+
+
+def delete_site_snapshot(folder_name: str, local_path: str) -> bool:
+    if not is_local_snapshot_path(local_path):
+        return False
+    if not folder_name or folder_name in {".", ".."} or "/" in folder_name or "\\" in folder_name:
+        return False
+    root = Path(settings.results_dir).resolve()
+    base = (Path(settings.results_dir) / folder_name / local_path).resolve()
+    try:
+        base.relative_to(root)
+    except Exception:
+        return False
+    if not base.is_dir() or base == root:
+        return False
+    shutil.rmtree(base, ignore_errors=True)
+    _prune_empty_parents(base)
+    return True
+
+
 def delete_snapshot(url: str, local_path: str | None = None, check_name: str | None = None) -> None:
     name = normalize_check_name(check_name)
     bases = [snapshot_dir(url, local_path=local_path, check_name=name) if local_path else site_dir(url, name)]
@@ -528,3 +566,5 @@ def delete_snapshot(url: str, local_path: str | None = None, check_name: str | N
     for base in bases:
         if base.is_dir():
             shutil.rmtree(base, ignore_errors=True)
+            if local_path:
+                _prune_empty_parents(base)

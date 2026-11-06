@@ -104,62 +104,10 @@ function AppContent() {
     }
   };
 
-  const handleCompare = async () => {
-    if (!url.trim() || !validateUrl(url)) {
-      showNotification("error", t("invalidUrl"));
-      return;
-    }
-
-    setLoading(true);
-    setLoadingAction("compare");
-
-    try {
-      const { res, data } = await apiFetch("/api/pages/compare", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          url,
-          locale,
-          snapshotId: versionA?.snapshotId ?? null,
-          checkName: checkName.trim() || null,
-        }),
-      });
-
-      if (!res.ok) {
-        setPagesRefreshToken((x) => x + 1);
-        if (res.status === 404) throw new Error(t("noSavedVersion"));
-        throw new Error(data.error || t("networkError"));
-      }
-
-      setComparison(data.comparison);
-      setShowDelta(false);
-      setPagesRefreshToken((x) => x + 1);
-
-      const summary = data.comparison?.summary;
-      if (
-        data.comparison?.textDiff?.hasChanges ||
-        summary?.attachmentsAdded > 0 ||
-        summary?.attachmentsRemoved > 0 ||
-        summary?.attachmentsModified > 0
-      ) {
-        showNotification("success", t("changesFound"));
-      } else {
-        showNotification("success", t("noChanges"));
-      }
-    } catch (error) {
-      setPagesRefreshToken((x) => x + 1);
-      showNotification("error", error.message);
-    } finally {
-      setLoading(false);
-      setLoadingAction("");
-    }
-  };
-
   const handleShowDelta = async () => {
     const hasTwoVersions = Boolean(versionA?.snapshotId != null && versionB?.snapshotId != null);
     if (!hasTwoVersions) {
-      if (comparison) setShowDelta(true);
-      else showNotification("error", t("selectTwoVersions"));
+      showNotification("error", t("selectTwoVersions"));
       return;
     }
     if (!url.trim() || !validateUrl(url)) {
@@ -224,6 +172,20 @@ function AppContent() {
     setShowDelta(false);
   };
 
+  const handleVersionDeleted = (page, snap) => {
+    const snapId = snap?.localPath || snap?.id;
+    if (versionA && versionA.url === page.url && sameSnapshot(versionA.snapshotId, snapId)) {
+      setVersionA(versionB);
+      setVersionB(null);
+      setComparison(null);
+      setShowDelta(false);
+    } else if (versionB && versionB.url === page.url && sameSnapshot(versionB.snapshotId, snapId)) {
+      setVersionB(null);
+      setComparison(null);
+      setShowDelta(false);
+    }
+  };
+
   const handleSelectVersion = (page, snap, checked) => {
     const next = {
       url: page.url,
@@ -269,6 +231,7 @@ function AppContent() {
         <SavedPages
           onSelectPage={handleSelectPage}
           onSelectVersion={handleSelectVersion}
+          onVersionDeleted={handleVersionDeleted}
           refreshToken={pagesRefreshToken}
           currentUrl={url}
           selectedSiteUrl={versionA?.url || versionB?.url}
@@ -288,7 +251,6 @@ function AppContent() {
 
             <ActionButtons
               onDownload={() => handleDownload(false)}
-              onCompare={handleCompare}
               onShowDelta={handleShowDelta}
               loading={loading}
               loadingAction={loadingAction}

@@ -4,7 +4,6 @@ import { useTranslation } from "../hooks/useTranslation";
 
 export default function ActionButtons({
   onDownload,
-  onCompare,
   onShowDelta,
   loading,
   loadingAction,
@@ -22,17 +21,7 @@ export default function ActionButtons({
         variant="primary"
         icon={<DownloadIcon />}
       >
-        {loading && loadingAction === "download" ? t("downloading") : t("downloadOriginal")}
-      </Button>
-
-      <Button
-        onClick={onCompare}
-        loading={loading && loadingAction === "compare"}
-        disabled={loading}
-        variant="secondary"
-        icon={<CompareIcon />}
-      >
-        {loading && loadingAction === "compare" ? t("comparing") : t("compareWithOriginal")}
+        {loading && loadingAction === "download" ? t("downloading") : t("downloadPage")}
       </Button>
 
       <Button
@@ -94,19 +83,6 @@ function DownloadIcon() {
         strokeLinejoin="round"
         strokeWidth={2}
         d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"
-      />
-    </svg>
-  );
-}
-
-function CompareIcon() {
-  return (
-    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-      <path
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        strokeWidth={2}
-        d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"
       />
     </svg>
   );

@@ -9,6 +9,7 @@ from .results_store import (
     comparison_snapshot,
     delete_legacy_snapshot,
     delete_site_dir,
+    delete_site_snapshot,
     delete_snapshot,
     is_local_snapshot_path,
     list_local_snapshots,
@@ -708,6 +709,60 @@ async def list_snapshots(url: str, request: Request):
 @router.get("", response_model=ListResponse)
 async def list_pages_alias(request: Request):
     return await list_pages(request)
+
+
+@router.delete("/{page_id}/snapshots")
+async def delete_page_snapshot(page_id: str, request: Request, snapshotId: str):
+    repo = _repo(request)
+    source = _parse_source(request)
+    blocked = _supabase_unavailable(source, repo)
+    if blocked:
+        return blocked
+    sid = (snapshotId or "").strip()
+    if not sid:
+        return JSONResponse(status_code=400, content={"error": "snapshotId is required"})
+
+    if source == "results":
+        if delete_site_snapshot(page_id, sid):
+            return {"success": True, "message": "Snapshot deleted"}
+        return JSONResponse(status_code=404, content={"error": "Snapshot not found"})
+
+    if repo is None:
+        return JSONResponse(status_code=400, content={"error": "Supabase is not configured"})
+
+    hist = await repo.get_history_by_id(page_id)
+    page = None
+    if hist and hist.get("page_id") is not None:
+        page = await repo.get_page_by_id(hist.get("page_id"))
+    if page is None:
+        page = await repo.get_page_by_id(page_id)
+
+    snap_row = await repo.get_snapshot(sid)
+    local_path = None
+    if snap_row:
+        local_path = snap_row.get("local_path") or snap_row.get("localPath")
+        await repo.delete_snapshot(snap_row["id"])
+    elif is_local_snapshot_path(sid):
+        local_path = sid
+        if page:
+            try:
+                for row in await repo.list_snapshots(page["id"]):
+                    path = row.get("local_path") or row.get("localPath")
+                    if path == sid:
+                        await repo.delete_snapshot(row["id"])
+                        break
+            except Exception:
+                pass
+    else:
+        return JSONResponse(status_code=404, content={"error": "Snapshot not found"})
+
+    url = (page or {}).get("url")
+    check_name = _resolve_check_name((hist or {}).get("check_name") if hist else None, page)
+    if url and local_path:
+        delete_snapshot(url, local_path=local_path, check_name=check_name)
+    if is_local_snapshot_path(sid):
+        delete_site_snapshot(page_id, sid)
+    return {"success": True, "message": "Snapshot deleted"}
 
 
 @router.delete("/{page_id}")

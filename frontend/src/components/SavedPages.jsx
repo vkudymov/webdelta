@@ -94,6 +94,7 @@ function VersionCheck({ checked, title, disabled, slot, onChange }) {
 export default function SavedPages({
   onSelectPage,
   onSelectVersion,
+  onVersionDeleted,
   refreshToken,
   currentUrl,
   selectedSiteUrl,
@@ -129,11 +130,38 @@ export default function SavedPages({
 
   const handleDelete = async (id) => {
     try {
-      await apiFetch(`/api/pages/${id}`, { method: "DELETE" });
+      await apiFetch(`/api/pages/${encodeURIComponent(id)}`, { method: "DELETE" });
       setPages((prev) => prev.filter((p) => p.id !== id));
       setDeleteConfirm(null);
     } catch (error) {
       console.error("Failed to delete page:", error);
+    }
+  };
+
+  const handleDeleteVersion = async (page, snap) => {
+    const snapKey = snap.localPath || snap.id;
+    try {
+      const { res } = await apiFetch(
+        `/api/pages/${encodeURIComponent(page.id)}/snapshots?snapshotId=${encodeURIComponent(snapKey)}`,
+        { method: "DELETE" }
+      );
+      if (!res.ok && res.status !== 404) {
+        console.error("Failed to delete snapshot");
+        return;
+      }
+      setPages((prev) =>
+        prev.map((item) => {
+          if (item.id !== page.id) return item;
+          return {
+            ...item,
+            snapshots: (item.snapshots || []).filter((s) => (s.localPath || s.id) !== snapKey),
+          };
+        })
+      );
+      setDeleteConfirm(null);
+      onVersionDeleted?.(page, snap);
+    } catch (error) {
+      console.error("Failed to delete snapshot:", error);
     }
   };
 
@@ -206,7 +234,7 @@ export default function SavedPages({
                     type="button"
                     onClick={(event) => {
                       event.stopPropagation();
-                      setDeleteConfirm(page.id);
+                      setDeleteConfirm({ type: "site", id: page.id });
                     }}
                     className="p-1 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
                     aria-label={t("delete")}
@@ -261,6 +289,7 @@ export default function SavedPages({
                             const isB = sameSite && sameId(versionBId, snapKey);
                             const selected = isA || isB;
                             const twoSelected = Boolean(versionAId && versionBId);
+                            const fileCount = Number(snap.attachmentCount) || 0;
                             return (
                               <div
                                 key={snap.id}
@@ -268,10 +297,14 @@ export default function SavedPages({
                                   selected ? "bg-white border border-blue-200" : "bg-slate-50"
                                 }`}
                               >
-                                <span className="flex-1 font-mono text-gray-700">{snap.timeLabel}</span>
+                                <span className="font-mono text-gray-700">{snap.timeLabel}</span>
+                                <span className="flex-1 text-[11px] text-gray-500 whitespace-nowrap">
+                                  {fileCount} {t("fileCount")}
+                                </span>
                                 <div
                                   onClick={(event) => event.stopPropagation()}
                                   onKeyDown={(event) => event.stopPropagation()}
+                                  className="flex items-center gap-1"
                                 >
                                   <VersionCheck
                                     checked={selected}
@@ -280,6 +313,24 @@ export default function SavedPages({
                                     disabled={!selected && twoSelected && sameSite}
                                     onChange={(checked) => onSelectVersion(page, snap, checked)}
                                   />
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setDeleteConfirm({ type: "snapshot", page, snap })
+                                    }
+                                    className="p-0.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded transition-colors"
+                                    aria-label={t("deleteVersion")}
+                                    title={t("deleteVersion")}
+                                  >
+                                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                      <path
+                                        strokeLinecap="round"
+                                        strokeLinejoin="round"
+                                        strokeWidth={2}
+                                        d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+                                      />
+                                    </svg>
+                                  </button>
                                 </div>
                               </div>
                             );
@@ -335,7 +386,9 @@ export default function SavedPages({
         createPortal(
           <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[100] p-4">
             <div className="bg-white rounded-2xl shadow-2xl max-w-sm w-full p-6">
-              <h3 className="text-lg font-semibold text-gray-800 mb-3">{t("confirmDelete")}</h3>
+              <h3 className="text-lg font-semibold text-gray-800 mb-3">
+                {deleteConfirm.type === "snapshot" ? t("confirmDeleteVersion") : t("confirmDelete")}
+              </h3>
               <div className="flex gap-3 justify-end">
                 <button
                   onClick={() => setDeleteConfirm(null)}
@@ -344,7 +397,11 @@ export default function SavedPages({
                   {t("cancel")}
                 </button>
                 <button
-                  onClick={() => handleDelete(deleteConfirm)}
+                  onClick={() =>
+                    deleteConfirm.type === "snapshot"
+                      ? handleDeleteVersion(deleteConfirm.page, deleteConfirm.snap)
+                      : handleDelete(deleteConfirm.id)
+                  }
                   className="px-4 py-2 rounded-xl font-medium text-white bg-red-600 hover:bg-red-700"
                 >
                   {t("delete")}

@@ -61,6 +61,8 @@ class Repo:
 
     async def get_latest_snapshot(self, page_id: Any) -> Optional[dict]: ...
 
+    async def delete_snapshot(self, snapshot_id: Any) -> bool: ...
+
     async def delete_attachments(self, snapshot_id: Any) -> None: ...
 
     async def insert_attachments(self, snapshot_id: Any, attachments: list[dict]) -> None: ...
@@ -289,6 +291,11 @@ class SupabaseRepo(Repo):
         )
         data = getattr(res, "data", None) or []
         return data[0] if data else None
+
+    async def delete_snapshot(self, snapshot_id: Any) -> bool:
+        await self.delete_attachments(snapshot_id)
+        res = self.client.table("snapshots").delete().eq("id", snapshot_id).execute()
+        return bool(getattr(res, "data", None))
 
     async def delete_attachments(self, snapshot_id: Any) -> None:
         self.client.table("attachments").delete().eq("snapshot_id", snapshot_id).execute()
