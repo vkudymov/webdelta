@@ -2,10 +2,12 @@
 
 import { useContext } from "react";
 import { LocaleContext } from "../lib/locale";
+import { useStorageSource } from "../lib/storage";
 import { useTranslation } from "../hooks/useTranslation";
 
 export default function Header() {
   const { locale, setLocale } = useContext(LocaleContext);
+  const { source, setSource, supabaseConfigured } = useStorageSource();
   const { t } = useTranslation();
 
   return (
@@ -24,6 +26,26 @@ export default function Header() {
         </div>
 
         <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setSource("results")}
+            className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${
+              source === "results" ? "bg-white text-blue-700" : "bg-white/10 hover:bg-white/20"
+            }`}
+          >
+            {t("sourceFiles")}
+          </button>
+          <button
+            type="button"
+            onClick={() => setSource("supabase")}
+            disabled={!supabaseConfigured}
+            title={!supabaseConfigured ? t("sourceUnavailable") : t("sourceSupabase")}
+            className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${
+              source === "supabase" ? "bg-white text-blue-700" : "bg-white/10 hover:bg-white/20"
+            } disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-white/10`}
+          >
+            {t("sourceSupabase")}
+          </button>
           <button
             onClick={() => setLocale("ru")}
             className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${

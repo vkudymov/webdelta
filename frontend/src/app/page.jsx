@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Header from "../components/Header";
 import UrlInput from "../components/UrlInput";
 import ActionButtons from "../components/ActionButtons";
@@ -9,11 +9,13 @@ import ConfirmDialog from "../components/ConfirmDialog";
 import Notification from "../components/Notification";
 import SavedPages from "../components/SavedPages";
 import { LocaleProvider } from "../lib/locale";
+import { StorageProvider, useStorageSource } from "../lib/storage";
 import { useTranslation } from "../hooks/useTranslation";
 import { apiFetch } from "../lib/api";
 
 function AppContent() {
   const { t, locale } = useTranslation();
+  const { source } = useStorageSource();
   const [url, setUrl] = useState("");
   const [checkName, setCheckName] = useState("");
   const [loading, setLoading] = useState(false);
@@ -39,6 +41,14 @@ function AppContent() {
       return false;
     }
   };
+
+  useEffect(() => {
+    setPagesRefreshToken((x) => x + 1);
+    setVersionA(null);
+    setVersionB(null);
+    setComparison(null);
+    setShowDelta(false);
+  }, [source]);
 
   const sameSnapshot = (left, right) =>
     left != null && right != null && String(left) === String(right);
@@ -367,7 +377,9 @@ function StatCard({ label, value, color }) {
 export default function Page() {
   return (
     <LocaleProvider>
-      <AppContent />
+      <StorageProvider>
+        <AppContent />
+      </StorageProvider>
     </LocaleProvider>
   );
 }

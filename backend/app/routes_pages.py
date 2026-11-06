@@ -8,15 +8,20 @@ from .fetcher import extract_attachment_links, fetch_attachments, fetch_page_ren
 from .results_store import (
     comparison_snapshot,
     delete_legacy_snapshot,
+    delete_site_dir,
     delete_snapshot,
     is_local_snapshot_path,
     list_local_snapshots,
+    list_sites,
+    load_latest_error,
     load_legacy_snapshot,
     load_snapshot,
     normalize_check_name,
     read_attachment_bytes,
+    save_error,
     save_legacy_snapshot,
     save_snapshot,
+    site_dir,
 )
 from .schemas import (
     CheckResponse,
@@ -41,6 +46,21 @@ def _browser(request: Request):
     return request.app.state.browser
 
 
+def _parse_source(request: Request, body_source: str | None = None) -> str:
+    raw = (body_source or request.query_params.get("source") or "results").strip().lower()
+    if raw not in ("results", "supabase"):
+        return "results"
+    return raw
+
+
+def _supabase_unavailable(source: str, repo) -> JSONResponse | None:
+    if source != "supabase":
+        return None
+    if repo is None:
+        return JSONResponse(status_code=400, content={"error": "Supabase is not configured"})
+    return None
+
+
 async def _persist_snapshot(
     repo,
     url: str,
@@ -52,6 +72,8 @@ async def _persist_snapshot(
     content = snapshot.get("content") or ""
     title = snapshot.get("title")
     name = normalize_check_name(check_name) or normalize_check_name(snapshot.get("checkName"))
+    if repo is None:
+        return None, None, len(snapshot.get("attachments") or fetched_attachments or [])
     if existing:
         page_id = existing["id"]
         await repo.update_page(page_id, content, title, check_name=name)
@@ -108,6 +130,13 @@ async def _mark_history(
     page_id=None,
     check_name: str | None = None,
 ):
+    if not ok and error:
+        try:
+            save_error(url, error, action=action, check_name=check_name)
+        except Exception:
+            pass
+    if repo is None:
+        return
     await repo.upsert_history(
         url,
         last_action=action,
@@ -372,6 +401,28 @@ async def check(url: str, request: Request):
         return JSONResponse(status_code=400, content={"error": "Invalid URL format"})
 
     repo = _repo(request)
+    source = _parse_source(request)
+    blocked = _supabase_unavailable(source, repo)
+    if blocked:
+        return blocked
+    if source == "results":
+        stored = load_snapshot(url) or load_legacy_snapshot(url)
+        if not stored:
+            return {"exists": False}
+        return {
+            "exists": True,
+            "page": {
+                "id": site_dir(url, stored.get("checkName")).name,
+                "url": stored.get("url") or url,
+                "title": stored.get("title"),
+                "created_at": stored.get("fetchedAt"),
+                "updated_at": stored.get("fetchedAt"),
+                "attachmentCount": len(stored.get("attachments") or []),
+            },
+        }
+
+    if repo is None:
+        return {"exists": False}
     page = await repo.get_page_by_url(url)
     if not page:
         return {"exists": False}
@@ -399,7 +450,11 @@ async def download(body: DownloadRequest, request: Request):
         return JSONResponse(status_code=400, content={"error": "Invalid URL format"})
 
     repo = _repo(request)
-    existing = await repo.get_page_by_url(url)
+    source = _parse_source(request, body.source)
+    blocked = _supabase_unavailable(source, repo)
+    if blocked:
+        return blocked
+    existing = await repo.get_page_by_url(url) if repo else None
     existing_id = existing["id"] if existing else None
     check_name = _resolve_check_name(body.checkName, existing)
     await _mark_history(repo, url, "download", False, page_id=existing_id, check_name=check_name)
@@ -428,6 +483,10 @@ async def download(body: DownloadRequest, request: Request):
     page_id, snapshot_id, attachment_count = await _persist_snapshot(
         repo, url, stored, current_attachments, existing, check_name=check_name
     )
+    if page_id is None:
+        page_id = site_dir(url, check_name).name
+        snapshot_id = stored.get("localPath")
+        attachment_count = len(stored.get("attachments") or current_attachments or [])
     await _mark_history(repo, url, "download", True, title=stored.get("title"), page_id=page_id, check_name=check_name)
     return {
         "success": True,
@@ -447,27 +506,43 @@ async def compare(body: CompareRequest, request: Request):
         return JSONResponse(status_code=400, content={"error": "Invalid URL format"})
 
     repo = _repo(request)
-    saved = await repo.get_page_by_url(url)
+    source = _parse_source(request, body.source)
+    blocked = _supabase_unavailable(source, repo)
+    if blocked:
+        return blocked
+    saved = await repo.get_page_by_url(url) if repo and source == "supabase" else None
     saved_id = saved["id"] if saved else None
     check_name = _resolve_check_name(body.checkName, saved)
     await _mark_history(repo, url, "compare", False, page_id=saved_id, check_name=check_name)
 
     two_saved = body.snapshotId is not None and body.snapshotId2 is not None
-    if not saved and not two_saved:
+    file_snapshot = load_snapshot(url, check_name=check_name) or load_legacy_snapshot(url, check_name=check_name)
+    if source == "results":
+        if not file_snapshot and not two_saved:
+            await _mark_history(
+                repo, url, "compare", False, error="No saved version found for this URL", check_name=check_name
+            )
+            return JSONResponse(status_code=404, content={"error": "No saved version found for this URL"})
+    elif not saved and not two_saved:
         await _mark_history(repo, url, "compare", False, error="No saved version found for this URL", check_name=check_name)
         return JSONResponse(status_code=404, content={"error": "No saved version found for this URL"})
 
     async def _snap_for(snapshot_id, *, allow_legacy: bool):
         if snapshot_id is not None:
             sid = str(snapshot_id).strip()
-            if is_local_snapshot_path(sid):
-                payload = load_snapshot(url, local_path=sid, check_name=check_name)
+            if is_local_snapshot_path(sid) or source == "results":
+                payload = load_snapshot(url, local_path=sid if is_local_snapshot_path(sid) else None, check_name=check_name)
+                if payload is None and is_local_snapshot_path(sid):
+                    return None, JSONResponse(status_code=404, content={"error": "Snapshot not found"})
+                if payload is not None:
+                    if is_local_snapshot_path(sid):
+                        payload.setdefault("localPath", sid)
+                    return payload, None
+            if not saved or repo is None:
+                payload = load_snapshot(url, local_path=sid if is_local_snapshot_path(sid) else None, check_name=check_name)
                 if payload is None:
                     return None, JSONResponse(status_code=404, content={"error": "Snapshot not found"})
-                payload.setdefault("localPath", sid)
                 return payload, None
-            if not saved:
-                return None, JSONResponse(status_code=404, content={"error": "Snapshot not found"})
             candidate = await repo.get_snapshot(snapshot_id)
             if not candidate or str(candidate.get("page_id")) != str(saved["id"]):
                 payload = load_snapshot(url, local_path=sid, check_name=check_name)
@@ -476,7 +551,7 @@ async def compare(body: CompareRequest, request: Request):
                 return payload, None
             payload = await _load_saved_snapshot(repo, url, candidate, check_name, allow_legacy=False)
             return payload, None
-        if not saved:
+        if not saved or repo is None or source == "results":
             payload = load_snapshot(url, check_name=check_name)
             if payload is None and allow_legacy:
                 payload = load_legacy_snapshot(url, check_name=check_name)
@@ -510,7 +585,7 @@ async def compare(body: CompareRequest, request: Request):
             return JSONResponse(status_code=500, content={"error": "Failed to load saved snapshot"})
         comparison = _diff_snapshots(url, left, right, check_name)
     else:
-        if not saved:
+        if source != "results" and not saved:
             await _mark_history(
                 repo, url, "compare", False, error="No saved version found for this URL", check_name=check_name
             )
@@ -571,6 +646,14 @@ async def compare(body: CompareRequest, request: Request):
 @router.get("/list", response_model=ListResponse)
 async def list_pages(request: Request):
     repo = _repo(request)
+    source = _parse_source(request)
+    blocked = _supabase_unavailable(source, repo)
+    if blocked:
+        return blocked
+    if source == "results":
+        return {"pages": list_sites()}
+    if repo is None:
+        return {"pages": []}
     rows = await repo.list_history()
     pages = []
     for row in rows:
@@ -584,6 +667,10 @@ async def list_pages(request: Request):
                 db_rows = []
         file_items = list_local_snapshots(item.get("url") or "", item.get("checkName"))
         item["snapshots"] = _merge_snapshots(db_rows, file_items)
+        if not item.get("lastError"):
+            stored = load_latest_error(item.get("url") or "", item.get("checkName"))
+            if stored and stored.get("error"):
+                item["lastError"] = stored.get("error")
         pages.append(item)
     return {"pages": pages}
 
@@ -595,16 +682,23 @@ async def list_snapshots(url: str, request: Request):
         return JSONResponse(status_code=400, content={"error": "Invalid URL format"})
 
     repo = _repo(request)
-    page = await repo.get_page_by_url(url)
+    source = _parse_source(request)
+    blocked = _supabase_unavailable(source, repo)
+    if blocked:
+        return blocked
     db_rows: list[dict] = []
     check_name = None
-    if page:
-        check_name = _resolve_check_name(None, page)
-        try:
-            db_rows = await repo.list_snapshots(page["id"])
-        except Exception:
-            db_rows = []
+    if source == "supabase" and repo:
+        page = await repo.get_page_by_url(url)
+        if page:
+            check_name = _resolve_check_name(None, page)
+            try:
+                db_rows = await repo.list_snapshots(page["id"])
+            except Exception:
+                db_rows = []
     file_items = list_local_snapshots(url, check_name)
+    if source == "results":
+        return {"url": url, "snapshots": file_items}
     return {"url": url, "snapshots": _merge_snapshots(db_rows, file_items)}
 
 
@@ -616,6 +710,17 @@ async def list_pages_alias(request: Request):
 @router.delete("/{page_id}")
 async def delete(page_id: str, request: Request):
     repo = _repo(request)
+    source = _parse_source(request)
+    blocked = _supabase_unavailable(source, repo)
+    if blocked:
+        return blocked
+    if source == "results":
+        if delete_site_dir(page_id):
+            return {"success": True, "message": "Page deleted"}
+        return JSONResponse(status_code=404, content={"error": "Page not found"})
+
+    if repo is None:
+        return JSONResponse(status_code=400, content={"error": "Supabase is not configured"})
     hist = await repo.get_history_by_id(page_id)
     if hist:
         page = await repo.get_page_by_id(hist.get("page_id")) if hist.get("page_id") is not None else None

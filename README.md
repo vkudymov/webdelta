@@ -6,16 +6,23 @@ A tool for tracking changes on web pages.
 
 ## Функциональность / Features
 
-- **Скачать оригинал / Download Original**: Сохраняет текст страницы и все вложения в базу данных
+- **Скачать оригинал / Download Original**: Сохраняет текст страницы и вложения
 - **Сравнить с оригиналом / Compare with Original**: Сравнивает текущую версию страницы с сохранённой
 - **Показать дельту / Show Delta**: Отображает найденные различия с подсветкой
+
+## Хранение / Storage
+
+- Снимки страниц **всегда** пишутся в папку `results/<сайт>/<дата>/<время>/` (`page.json`, вложения, `error.json`).
+- **Supabase** опционален: если в `.env` заданы `SUPABASE_URL` и `SUPABASE_SERVICE_ROLE_KEY`, те же данные дополнительно пишутся в облачную БД.
+- Без ключей Supabase приложение работает только с файлами.
+- В шапке рядом с языком выбирается, **откуда читать** данные: **Файлы** или **Supabase**.
 
 ## Технический стек / Tech Stack
 
 - **Frontend**: Next.js + Tailwind CSS
 - **Backend**: Python + FastAPI
 - **Web reading**: Playwright (rendered DOM)
-- **Database**: Supabase (Postgres) (в dev без ключей автоматически используется локальный SQLite fallback)
+- **Storage**: local `results/` + optional Supabase (Postgres)
 - **AI**: OpenAI SDK — короткое объяснение дельты (опционально)
 
 ## Запуск разработки / Dev
@@ -29,6 +36,8 @@ A tool for tracking changes on web pages.
 - Frontend: http://localhost:3000
 - Backend: http://127.0.0.1:8000
 
+Либо из VS Code / Cursor: запустите `run.py`.
+
 ## Переменные окружения / Environment
 
 Скопируйте пример и заполните нужные значения:
@@ -37,7 +46,7 @@ A tool for tracking changes on web pages.
 cp .env.example .env
 ```
 
-Если `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` не заданы, backend автоматически использует локальный `SQLite` файл `backend/webdelta.dev.db`.
+Локальные снимки сохраняются в `RESULTS_DIR` (по умолчанию `results/`). Ключи Supabase нужны только если хотите читать и писать в облако.
 
 ## Supabase schema
 
@@ -45,11 +54,14 @@ SQL схема лежит в `backend/supabase/schema.sql`. Её можно вы
 
 ## API Endpoints
 
-- `GET /api/pages/check?url=<url>` — проверить наличие сохранённой страницы
+- `GET /api/storage` — доступные источники (`results`, опционально `supabase`)
+- `GET /api/pages/check?url=<url>&source=` — проверить наличие сохранённой страницы
 - `POST /api/pages/download` — скачать и сохранить страницу
 - `POST /api/pages/compare` — сравнить текущую версию с сохранённой (в ответе может быть `explanation`)
-- `GET /api/pages/list` — список всех сохранённых страниц
-- `DELETE /api/pages/{id}` — удалить сохранённую страницу
+- `GET /api/pages/list?source=` — список сайтов
+- `DELETE /api/pages/{id}?source=` — удалить сайт
+
+Параметр `source` — `results` или `supabase`.
 
 ## Структура проекта / Project Structure
 
@@ -63,13 +75,14 @@ webdelta/
 ├── frontend/
 │   ├── src/                  # Next.js App Router UI
 │   └── package.json
+├── results/                  # локальные снимки страниц
 └── README.md
 ```
 
 ## Локализация / Localization
 
 Интерфейс поддерживает два языка:
-- 🇷🇺 Русский (по умолчанию)
-- 🇬🇧 English
+- Русский (по умолчанию)
+- English
 
 Переключение языка доступно в шапке приложения.

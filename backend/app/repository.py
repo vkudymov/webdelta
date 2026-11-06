@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import os
-import sqlite3
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -13,10 +11,6 @@ from .config import settings
 
 class StorageError(RuntimeError):
     pass
-
-
-def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def create_supabase() -> Optional[Client]:
@@ -76,390 +70,16 @@ class Repo:
     async def store_binary_attachment(self, page_id: Any, snapshot_id: Any, att: dict) -> str: ...
 
 
-class SqliteRepo(Repo):
-    def __init__(self, path: str):
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        self.path = path
-
-    def _conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path)
-        conn.row_factory = sqlite3.Row
-        return conn
-
-    async def init(self) -> None:
-        with self._conn() as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS pages (
-                  id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  url TEXT UNIQUE NOT NULL,
-                  content TEXT NOT NULL,
-                  title TEXT,
-                  check_name TEXT,
-                  created_at TEXT NOT NULL,
-                  updated_at TEXT NOT NULL
-                );
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS snapshots (
-                  id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  page_id INTEGER NOT NULL,
-                  captured_at TEXT NOT NULL,
-                  content TEXT NOT NULL,
-                  title TEXT,
-                  local_path TEXT,
-                  created_at TEXT NOT NULL,
-                  UNIQUE(page_id, captured_at)
-                );
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS attachments (
-                  id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  snapshot_id INTEGER NOT NULL,
-                  url TEXT NOT NULL,
-                  filename TEXT NOT NULL,
-                  content_type TEXT,
-                  size INTEGER,
-                  hash TEXT,
-                  text_content TEXT,
-                  storage_path TEXT,
-                  created_at TEXT NOT NULL,
-                  UNIQUE(snapshot_id, url)
-                );
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS url_history (
-                  id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  url TEXT UNIQUE NOT NULL,
-                  title TEXT,
-                  check_name TEXT,
-                  last_action TEXT NOT NULL,
-                  last_ok INTEGER NOT NULL DEFAULT 0,
-                  last_error TEXT,
-                  page_id INTEGER,
-                  created_at TEXT NOT NULL,
-                  updated_at TEXT NOT NULL
-                );
-                """
-            )
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_pages_url ON pages(url);")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_snapshots_page_id ON snapshots(page_id);")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_attachments_snapshot_id ON attachments(snapshot_id);")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_url_history_url ON url_history(url);")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_url_history_updated_at ON url_history(updated_at);")
-            page_cols = [r["name"] for r in conn.execute("PRAGMA table_info(pages);").fetchall()]
-            if "check_name" not in page_cols:
-                conn.execute("ALTER TABLE pages ADD COLUMN check_name TEXT")
-            history_cols = [r["name"] for r in conn.execute("PRAGMA table_info(url_history);").fetchall()]
-            if "check_name" not in history_cols:
-                conn.execute("ALTER TABLE url_history ADD COLUMN check_name TEXT")
-            conn.execute(
-                """
-                INSERT OR IGNORE INTO url_history(url, title, last_action, last_ok, last_error, page_id, created_at, updated_at)
-                SELECT url, title, 'download', 1, NULL, id, created_at, updated_at FROM pages
-                """
-            )
-
-            # One-time migration for older sqlite schema (attachments.page_id, no snapshots).
-            cols = [r["name"] for r in conn.execute("PRAGMA table_info(attachments);").fetchall()]
-            if "page_id" in cols and "snapshot_id" not in cols:
-                now = _utc_now_iso()
-                conn.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS attachments_v2 (
-                      id INTEGER PRIMARY KEY AUTOINCREMENT,
-                      snapshot_id INTEGER NOT NULL,
-                      url TEXT NOT NULL,
-                      filename TEXT NOT NULL,
-                      content_type TEXT,
-                      size INTEGER,
-                      hash TEXT,
-                      text_content TEXT,
-                      storage_path TEXT,
-                      created_at TEXT NOT NULL,
-                      UNIQUE(snapshot_id, url)
-                    );
-                    """
-                )
-                pages = conn.execute("SELECT * FROM pages").fetchall()
-                for p in pages:
-                    captured_at = p["updated_at"] or now
-                    cur = conn.execute(
-                        "INSERT OR IGNORE INTO snapshots(page_id, captured_at, content, title, local_path, created_at) VALUES(?,?,?,?,?,?)",
-                        (p["id"], captured_at, p["content"], p["title"], None, now),
-                    )
-                    snapshot_id = cur.lastrowid
-                    if not snapshot_id:
-                        row = conn.execute(
-                            "SELECT id FROM snapshots WHERE page_id=? AND captured_at=? LIMIT 1",
-                            (p["id"], captured_at),
-                        ).fetchone()
-                        snapshot_id = row["id"] if row else None
-                    if not snapshot_id:
-                        continue
-                    atts = conn.execute("SELECT * FROM attachments WHERE page_id = ?", (p["id"],)).fetchall()
-                    for a in atts:
-                        conn.execute(
-                            """
-                            INSERT OR IGNORE INTO attachments_v2(snapshot_id, url, filename, content_type, size, hash, text_content, storage_path, created_at)
-                            VALUES(?,?,?,?,?,?,?,?,?)
-                            """,
-                            (
-                                snapshot_id,
-                                a["url"],
-                                a["filename"],
-                                a["content_type"],
-                                a["size"],
-                                a["hash"],
-                                a["text_content"],
-                                a["storage_path"],
-                                a["created_at"] or now,
-                            ),
-                        )
-                conn.execute("DROP TABLE attachments;")
-                conn.execute("ALTER TABLE attachments_v2 RENAME TO attachments;")
-                conn.execute("CREATE INDEX IF NOT EXISTS idx_attachments_snapshot_id ON attachments(snapshot_id);")
-
-    async def get_page_by_url(self, url: str) -> Optional[dict]:
-        with self._conn() as conn:
-            row = conn.execute("SELECT * FROM pages WHERE url = ?", (url,)).fetchone()
-            return dict(row) if row else None
-
-    async def get_page_by_id(self, page_id: Any) -> Optional[dict]:
-        with self._conn() as conn:
-            row = conn.execute("SELECT * FROM pages WHERE id = ?", (page_id,)).fetchone()
-            return dict(row) if row else None
-
-    async def count_attachments(self, page_id: Any) -> int:
-        with self._conn() as conn:
-            snap = conn.execute(
-                "SELECT id FROM snapshots WHERE page_id = ? ORDER BY captured_at DESC LIMIT 1", (page_id,)
-            ).fetchone()
-            if not snap:
-                return 0
-            row = conn.execute("SELECT COUNT(*) AS c FROM attachments WHERE snapshot_id = ?", (snap["id"],)).fetchone()
-            return int(row["c"]) if row else 0
-
-    async def list_pages(self) -> list[dict]:
-        with self._conn() as conn:
-            rows = conn.execute(
-                """
-                SELECT p.*,
-                       (
-                         SELECT COUNT(*) FROM attachments a
-                         WHERE a.snapshot_id = (
-                           SELECT s.id FROM snapshots s
-                           WHERE s.page_id = p.id
-                           ORDER BY s.captured_at DESC
-                           LIMIT 1
-                         )
-                       ) AS attachment_count
-                FROM pages p
-                ORDER BY updated_at DESC
-                """
-            ).fetchall()
-            return [dict(r) for r in rows]
-
-    async def upsert_history(
-        self,
-        url: str,
-        last_action: str,
-        last_ok: bool,
-        last_error: str | None = None,
-        title: str | None = None,
-        page_id: Any = None,
-        check_name: str | None = None,
-    ) -> Any:
-        now = _utc_now_iso()
-        with self._conn() as conn:
-            existing = conn.execute("SELECT * FROM url_history WHERE url = ?", (url,)).fetchone()
-            if existing:
-                conn.execute(
-                    """
-                    UPDATE url_history
-                    SET last_action = ?, last_ok = ?, last_error = ?, title = ?, page_id = ?, check_name = ?, updated_at = ?
-                    WHERE url = ?
-                    """,
-                    (
-                        last_action,
-                        1 if last_ok else 0,
-                        last_error,
-                        title if title is not None else existing["title"],
-                        page_id if page_id is not None else existing["page_id"],
-                        check_name if check_name is not None else existing["check_name"],
-                        now,
-                        url,
-                    ),
-                )
-                return existing["id"]
-            cur = conn.execute(
-                """
-                INSERT INTO url_history(url, title, last_action, last_ok, last_error, page_id, check_name, created_at, updated_at)
-                VALUES(?,?,?,?,?,?,?,?,?)
-                """,
-                (url, title, last_action, 1 if last_ok else 0, last_error, page_id, check_name, now, now),
-            )
-            return cur.lastrowid
-
-    async def list_history(self) -> list[dict]:
-        with self._conn() as conn:
-            rows = conn.execute(
-                """
-                SELECT h.*,
-                       (
-                         SELECT COUNT(*) FROM attachments a
-                         WHERE a.snapshot_id = (
-                           SELECT s.id FROM snapshots s
-                           WHERE s.page_id = h.page_id
-                           ORDER BY s.captured_at DESC
-                           LIMIT 1
-                         )
-                       ) AS attachment_count
-                FROM url_history h
-                ORDER BY h.updated_at DESC
-                """
-            ).fetchall()
-            return [dict(r) for r in rows]
-
-    async def get_history_by_id(self, history_id: Any) -> Optional[dict]:
-        if isinstance(history_id, str) and history_id.isdigit():
-            history_id = int(history_id)
-        with self._conn() as conn:
-            row = conn.execute("SELECT * FROM url_history WHERE id = ?", (history_id,)).fetchone()
-            return dict(row) if row else None
-
-    async def delete_history(self, history_id: Any) -> bool:
-        with self._conn() as conn:
-            cur = conn.execute("DELETE FROM url_history WHERE id = ?", (history_id,))
-            return cur.rowcount > 0
-
-    async def insert_page(self, url: str, content: str, title: str | None, check_name: str | None = None) -> Any:
-        now = _utc_now_iso()
-        with self._conn() as conn:
-            cur = conn.execute(
-                "INSERT INTO pages(url, content, title, check_name, created_at, updated_at) VALUES(?,?,?,?,?,?)",
-                (url, content, title, check_name, now, now),
-            )
-            return cur.lastrowid
-
-    async def update_page(self, page_id: Any, content: str, title: str | None, check_name: str | None = None) -> None:
-        now = _utc_now_iso()
-        with self._conn() as conn:
-            if check_name is not None:
-                conn.execute(
-                    "UPDATE pages SET content = ?, title = ?, check_name = ?, updated_at = ? WHERE id = ?",
-                    (content, title, check_name, now, page_id),
-                )
-            else:
-                conn.execute(
-                    "UPDATE pages SET content = ?, title = ?, updated_at = ? WHERE id = ?",
-                    (content, title, now, page_id),
-                )
-
-    async def delete_page(self, page_id: Any) -> bool:
-        with self._conn() as conn:
-            conn.execute("DELETE FROM attachments WHERE snapshot_id IN (SELECT id FROM snapshots WHERE page_id = ?)", (page_id,))
-            conn.execute("DELETE FROM snapshots WHERE page_id = ?", (page_id,))
-            conn.execute("UPDATE url_history SET page_id = NULL WHERE page_id = ?", (page_id,))
-            cur = conn.execute("DELETE FROM pages WHERE id = ?", (page_id,))
-            return cur.rowcount > 0
-
-    async def insert_snapshot(self, page_id: Any, captured_at: str, content: str, title: str | None, local_path: str | None) -> Any:
-        now = _utc_now_iso()
-        with self._conn() as conn:
-            cur = conn.execute(
-                "INSERT INTO snapshots(page_id, captured_at, content, title, local_path, created_at) VALUES(?,?,?,?,?,?)",
-                (page_id, captured_at, content, title, local_path, now),
-            )
-            return cur.lastrowid
-
-    async def get_snapshot(self, snapshot_id: Any) -> Optional[dict]:
-        with self._conn() as conn:
-            row = conn.execute("SELECT * FROM snapshots WHERE id = ?", (snapshot_id,)).fetchone()
-            return dict(row) if row else None
-
-    async def list_snapshots(self, page_id: Any) -> list[dict]:
-        with self._conn() as conn:
-            rows = conn.execute(
-                """
-                SELECT s.*,
-                       (SELECT COUNT(*) FROM attachments a WHERE a.snapshot_id = s.id) AS attachment_count
-                FROM snapshots s
-                WHERE s.page_id = ?
-                ORDER BY s.captured_at DESC
-                """,
-                (page_id,),
-            ).fetchall()
-            return [dict(r) for r in rows]
-
-    async def get_latest_snapshot(self, page_id: Any) -> Optional[dict]:
-        with self._conn() as conn:
-            row = conn.execute(
-                "SELECT * FROM snapshots WHERE page_id = ? ORDER BY captured_at DESC LIMIT 1", (page_id,)
-            ).fetchone()
-            return dict(row) if row else None
-
-    async def delete_attachments(self, snapshot_id: Any) -> None:
-        with self._conn() as conn:
-            conn.execute("DELETE FROM attachments WHERE snapshot_id = ?", (snapshot_id,))
-
-    async def insert_attachments(self, snapshot_id: Any, attachments: list[dict]) -> None:
-        now = _utc_now_iso()
-        with self._conn() as conn:
-            for a in attachments:
-                conn.execute(
-                    """
-                    INSERT INTO attachments(snapshot_id, url, filename, content_type, size, hash, text_content, storage_path, created_at)
-                    VALUES(?,?,?,?,?,?,?,?,?)
-                    """,
-                    (
-                        snapshot_id,
-                        a.get("url"),
-                        a.get("filename"),
-                        a.get("content_type"),
-                        a.get("size"),
-                        a.get("hash"),
-                        a.get("text_content"),
-                        a.get("storage_path"),
-                        now,
-                    ),
-                )
-
-    async def list_attachments(self, snapshot_id: Any) -> list[dict]:
-        with self._conn() as conn:
-            rows = conn.execute("SELECT * FROM attachments WHERE snapshot_id = ?", (snapshot_id,)).fetchall()
-            return [dict(r) for r in rows]
-
-    async def store_binary_attachment(self, page_id: Any, snapshot_id: Any, att: dict) -> str:
-        # For sqlite dev mode we don't persist bytes; keep only metadata.
-        return att.get("storage_path") or ""
-
-
 class SupabaseRepo(Repo):
     def __init__(self, client: Client):
         self.client = client
-        self._history_sqlite: SqliteRepo | None = None
 
     async def init(self) -> None:
-        # Supabase schema is managed separately (schema.sql).
         return None
 
     def _missing_history_table(self, exc: Exception) -> bool:
         text = str(exc)
         return "url_history" in text and ("PGRST205" in text or "schema cache" in text)
-
-    async def enable_sqlite_history(self) -> SqliteRepo:
-        if self._history_sqlite is None:
-            repo = SqliteRepo(settings.sqlite_path)
-            await repo.init()
-            self._history_sqlite = repo
-        return self._history_sqlite
 
     async def get_page_by_url(self, url: str) -> Optional[dict]:
         res = self.client.table("pages").select("*").eq("url", url).limit(1).execute()
@@ -482,7 +102,6 @@ class SupabaseRepo(Repo):
     async def list_pages(self) -> list[dict]:
         res = self.client.table("pages").select("*").order("updated_at", desc=True).execute()
         pages = getattr(res, "data", None) or []
-        # Attachment counts: keep simple (N+1); still ok for small datasets.
         for p in pages:
             p["attachment_count"] = await self.count_attachments(p["id"])
         return pages
@@ -497,19 +116,12 @@ class SupabaseRepo(Repo):
         page_id: Any = None,
         check_name: str | None = None,
     ) -> Any:
-        if self._history_sqlite is not None:
-            return await self._history_sqlite.upsert_history(
-                url, last_action, last_ok, last_error, title, page_id, check_name
-            )
         now = datetime.now(timezone.utc).isoformat()
         try:
             existing = self.client.table("url_history").select("*").eq("url", url).limit(1).execute()
         except APIError as exc:
             if self._missing_history_table(exc):
-                store = await self.enable_sqlite_history()
-                return await store.upsert_history(
-                    url, last_action, last_ok, last_error, title, page_id, check_name
-                )
+                return None
             raise
         rows = getattr(existing, "data", None) or []
         if rows:
@@ -525,7 +137,7 @@ class SupabaseRepo(Repo):
             }
             res = self.client.table("url_history").update(payload).eq("url", url).execute()
             data = getattr(res, "data", None) or []
-            return (data[0]["id"] if data else current.get("id"))
+            return data[0]["id"] if data else current.get("id")
         payload = {
             "url": url,
             "title": title,
@@ -544,14 +156,11 @@ class SupabaseRepo(Repo):
         return data[0]["id"]
 
     async def list_history(self) -> list[dict]:
-        if self._history_sqlite is not None:
-            return await self._history_sqlite.list_history()
         try:
             res = self.client.table("url_history").select("*").order("updated_at", desc=True).execute()
         except APIError as exc:
             if self._missing_history_table(exc):
-                store = await self.enable_sqlite_history()
-                return await store.list_history()
+                return []
             raise
         rows = getattr(res, "data", None) or []
         for row in rows:
@@ -560,27 +169,21 @@ class SupabaseRepo(Repo):
         return rows
 
     async def get_history_by_id(self, history_id: Any) -> Optional[dict]:
-        if self._history_sqlite is not None:
-            return await self._history_sqlite.get_history_by_id(history_id)
         try:
             res = self.client.table("url_history").select("*").eq("id", history_id).limit(1).execute()
         except APIError as exc:
             if self._missing_history_table(exc):
-                store = await self.enable_sqlite_history()
-                return await store.get_history_by_id(history_id)
+                return None
             raise
         data = getattr(res, "data", None) or []
         return data[0] if data else None
 
     async def delete_history(self, history_id: Any) -> bool:
-        if self._history_sqlite is not None:
-            return await self._history_sqlite.delete_history(history_id)
         try:
             res = self.client.table("url_history").delete().eq("id", history_id).execute()
         except APIError as exc:
             if self._missing_history_table(exc):
-                store = await self.enable_sqlite_history()
-                return await store.delete_history(history_id)
+                return False
             raise
         data = getattr(res, "data", None)
         return bool(data)
@@ -600,21 +203,23 @@ class SupabaseRepo(Repo):
         self.client.table("pages").update(payload).eq("id", page_id).execute()
 
     async def delete_page(self, page_id: Any) -> bool:
-        if self._history_sqlite is not None:
-            with self._history_sqlite._conn() as conn:
-                conn.execute("UPDATE url_history SET page_id = NULL WHERE page_id = ?", (page_id,))
-        else:
-            try:
-                self.client.table("url_history").update({"page_id": None}).eq("page_id", page_id).execute()
-            except APIError as exc:
-                if not self._missing_history_table(exc):
-                    raise
+        try:
+            self.client.table("url_history").update({"page_id": None}).eq("page_id", page_id).execute()
+        except APIError as exc:
+            if not self._missing_history_table(exc):
+                raise
         res = self.client.table("pages").delete().eq("id", page_id).execute()
         data = getattr(res, "data", None)
         return bool(data)
 
     async def insert_snapshot(self, page_id: Any, captured_at: str, content: str, title: str | None, local_path: str | None) -> Any:
-        payload = {"page_id": page_id, "captured_at": captured_at, "content": content, "title": title, "local_path": local_path}
+        payload = {
+            "page_id": page_id,
+            "captured_at": captured_at,
+            "content": content,
+            "title": title,
+            "local_path": local_path,
+        }
         res = self.client.table("snapshots").insert(payload).execute()
         data = getattr(res, "data", None) or []
         if not data:
@@ -635,7 +240,14 @@ class SupabaseRepo(Repo):
         return snaps
 
     async def get_latest_snapshot(self, page_id: Any) -> Optional[dict]:
-        res = self.client.table("snapshots").select("*").eq("page_id", page_id).order("captured_at", desc=True).limit(1).execute()
+        res = (
+            self.client.table("snapshots")
+            .select("*")
+            .eq("page_id", page_id)
+            .order("captured_at", desc=True)
+            .limit(1)
+            .execute()
+        )
         data = getattr(res, "data", None) or []
         return data[0] if data else None
 
@@ -669,48 +281,21 @@ class SupabaseRepo(Repo):
         bucket = self.client.storage.from_(settings.supabase_attachments_bucket)
         filename = att.get("filename") or "file"
         h = att.get("hash") or "hash"
-        # avoid collisions
         path = f"{page_id}/{snapshot_id}/{h}_{filename}"
         content_type = att.get("content_type") or "application/octet-stream"
         data = att.get("bytes") or b""
-        # supabase-py accepts bytes directly
         bucket.upload(path, data, file_options={"content-type": content_type, "upsert": "true"})
         return path
 
 
-async def get_repo() -> Repo:
-    backend = (settings.storage_backend or "").lower()
-    if backend == "sqlite":
-        repo: Repo = SqliteRepo(settings.sqlite_path)
-        await repo.init()
-        return repo
-
+async def get_repo() -> Optional[Repo]:
     sb = create_supabase()
     if sb is None:
-        # Dev-friendly fallback if keys are not provided.
-        repo = SqliteRepo(settings.sqlite_path)
-        await repo.init()
-        return repo
-    # If Supabase schema is not migrated yet (no snapshots table), fall back to sqlite to keep app usable.
-    history_ok = True
+        return None
     try:
         sb.table("snapshots").select("id").limit(1).execute()
-        try:
-            sb.table("url_history").select("id").limit(1).execute()
-        except APIError:
-            history_ok = False
-    except APIError:
-        repo = SqliteRepo(settings.sqlite_path)
-        await repo.init()
-        return repo
     except Exception:
-        repo = SqliteRepo(settings.sqlite_path)
-        await repo.init()
-        return repo
-
+        return None
     repo = SupabaseRepo(sb)
     await repo.init()
-    if not history_ok:
-        await repo.enable_sqlite_history()
     return repo
-

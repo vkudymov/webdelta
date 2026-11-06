@@ -1,8 +1,10 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import { useTranslation } from "../hooks/useTranslation";
 import { apiFetch } from "../lib/api";
+import { useStorageSource } from "../lib/storage";
 
 function statusLabel(page, t) {
   if (!page.lastOk) return t("statusError");
@@ -64,6 +66,12 @@ function siteTitle(page) {
   return page.checkName || page.title || page.url;
 }
 
+function actionLabel(action, t) {
+  if (action === "compare") return t("actionCompare");
+  if (action === "download") return t("actionDownload");
+  return action || "—";
+}
+
 function VersionCheck({ checked, title, disabled, slot, onChange }) {
   return (
     <label
@@ -93,26 +101,31 @@ export default function SavedPages({
   versionBId,
 }) {
   const { t } = useTranslation();
+  const { source } = useStorageSource();
   const [pages, setPages] = useState([]);
   const [loading, setLoading] = useState(true);
   const [deleteConfirm, setDeleteConfirm] = useState(null);
+  const [errorPage, setErrorPage] = useState(null);
   const [collapsed, setCollapsed] = useState({});
 
-  const fetchPages = async () => {
-    try {
-      const { data } = await apiFetch("/api/pages/list");
-      setPages(data.pages || []);
-    } catch (error) {
-      console.error("Failed to fetch pages:", error);
-    } finally {
-      setLoading(false);
-    }
-  };
-
   useEffect(() => {
-    fetchPages();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [refreshToken]);
+    let cancelled = false;
+    setPages([]);
+    setLoading(true);
+    (async () => {
+      try {
+        const { data } = await apiFetch("/api/pages/list");
+        if (!cancelled) setPages(data.pages || []);
+      } catch (error) {
+        console.error("Failed to fetch pages:", error);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [refreshToken, source]);
 
   const handleDelete = async (id) => {
     try {
@@ -129,6 +142,7 @@ export default function SavedPages({
   };
 
   return (
+    <>
     <aside className="bg-white rounded-2xl shadow-xl p-4 h-fit sticky top-4 max-h-[calc(100vh-6rem)] overflow-y-auto">
       <h2 className="text-lg font-semibold text-gray-800 mb-3">{t("siteList")}</h2>
 
@@ -209,9 +223,23 @@ export default function SavedPages({
                 </div>
 
                 <div className="flex items-center justify-between gap-2 mt-2 pl-6">
-                  <span className={`text-[11px] px-2 py-0.5 rounded-full ${statusClass(page)}`}>
-                    {statusLabel(page, t)}
-                  </span>
+                  {page.lastOk ? (
+                    <span className={`text-[11px] px-2 py-0.5 rounded-full ${statusClass(page)}`}>
+                      {statusLabel(page, t)}
+                    </span>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        setErrorPage(page);
+                      }}
+                      className={`text-[11px] px-2 py-0.5 rounded-full ${statusClass(page)} hover:ring-2 hover:ring-red-200`}
+                      title={t("viewError")}
+                    >
+                      {statusLabel(page, t)}
+                    </button>
+                  )}
                   <span className="text-[11px] text-gray-500">
                     {snapshots.length} {t("snapshotCount")}
                   </span>
@@ -266,28 +294,66 @@ export default function SavedPages({
           })}
         </div>
       )}
-
-      {deleteConfirm && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-2xl shadow-2xl max-w-sm w-full p-6">
-            <h3 className="text-lg font-semibold text-gray-800 mb-3">{t("confirmDelete")}</h3>
-            <div className="flex gap-3 justify-end">
-              <button
-                onClick={() => setDeleteConfirm(null)}
-                className="px-4 py-2 rounded-xl font-medium text-gray-700 bg-gray-100 hover:bg-gray-200"
-              >
-                {t("cancel")}
-              </button>
-              <button
-                onClick={() => handleDelete(deleteConfirm)}
-                className="px-4 py-2 rounded-xl font-medium text-white bg-red-600 hover:bg-red-700"
-              >
-                {t("delete")}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </aside>
+
+      {errorPage &&
+        createPortal(
+          <div
+            className="fixed inset-0 bg-black/50 flex items-center justify-center z-[100] p-4"
+            onClick={() => setErrorPage(null)}
+          >
+            <div
+              className="bg-white rounded-2xl shadow-2xl max-w-lg w-full p-6"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <h3 className="text-lg font-semibold text-gray-800 mb-3">{t("readErrorTitle")}</h3>
+              <div className="space-y-2 text-sm mb-4">
+                <div className="font-medium text-gray-800 break-words">{siteTitle(errorPage)}</div>
+                <div className="text-blue-600 break-all">{errorPage.url}</div>
+                <div className="text-gray-500">
+                  {t("readErrorAction")}: {actionLabel(errorPage.lastAction, t)}
+                </div>
+              </div>
+              <pre className="text-sm text-red-800 bg-red-50 border border-red-100 rounded-xl p-3 whitespace-pre-wrap break-words max-h-64 overflow-y-auto">
+                {errorPage.lastError || t("readErrorEmpty")}
+              </pre>
+              <div className="flex justify-end mt-5">
+                <button
+                  type="button"
+                  onClick={() => setErrorPage(null)}
+                  className="px-4 py-2 rounded-xl font-medium text-gray-700 bg-gray-100 hover:bg-gray-200"
+                >
+                  {t("close")}
+                </button>
+              </div>
+            </div>
+          </div>,
+          document.body
+        )}
+
+      {deleteConfirm &&
+        createPortal(
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[100] p-4">
+            <div className="bg-white rounded-2xl shadow-2xl max-w-sm w-full p-6">
+              <h3 className="text-lg font-semibold text-gray-800 mb-3">{t("confirmDelete")}</h3>
+              <div className="flex gap-3 justify-end">
+                <button
+                  onClick={() => setDeleteConfirm(null)}
+                  className="px-4 py-2 rounded-xl font-medium text-gray-700 bg-gray-100 hover:bg-gray-200"
+                >
+                  {t("cancel")}
+                </button>
+                <button
+                  onClick={() => handleDelete(deleteConfirm)}
+                  className="px-4 py-2 rounded-xl font-medium text-white bg-red-600 hover:bg-red-700"
+                >
+                  {t("delete")}
+                </button>
+              </div>
+            </div>
+          </div>,
+          document.body
+        )}
+    </>
   );
 }

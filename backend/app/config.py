@@ -20,9 +20,6 @@ class Settings(BaseSettings):
     port: int = 8000
     cors_origins: str = "http://localhost:3000"
 
-    # Storage backend: "supabase" or "sqlite"
-    storage_backend: str = "supabase"
-    sqlite_path: str = str(ROOT_DIR / "backend" / "webdelta.dev.db")
     results_dir: str = str(ROOT_DIR / "results")
 
     # Supabase
@@ -59,6 +56,5 @@ def _resolve_under_root(p: str) -> str:
 
 
 # Allow relative paths in .env (resolve relative to repo root, not process CWD)
-settings.sqlite_path = _resolve_under_root(settings.sqlite_path)
 settings.results_dir = _resolve_under_root(settings.results_dir)
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from playwright.async_api import async_playwright
 
@@ -53,4 +53,17 @@ app.include_router(pages_router)
 @app.get("/health")
 async def health():
     return {"ok": True}
+
+
+@app.get("/api/storage")
+async def storage_info(request: Request):
+    configured = request.app.state.repo is not None
+    sources = ["results"]
+    if configured:
+        sources.append("supabase")
+    return {
+        "supabaseConfigured": configured,
+        "sources": sources,
+        "resultsDir": "results",
+    }
 

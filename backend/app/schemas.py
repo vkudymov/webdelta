@@ -19,6 +19,7 @@ class DownloadRequest(BaseModel):
     url: str
     overwrite: bool = False
     checkName: str | None = None
+    source: Literal["results", "supabase"] | None = None
 
 
 class CompareRequest(BaseModel):
@@ -27,6 +28,7 @@ class CompareRequest(BaseModel):
     snapshotId: int | str | None = None
     snapshotId2: int | str | None = None
     checkName: str | None = None
+    source: Literal["results", "supabase"] | None = None
 
 
 class DownloadResponse(BaseModel):

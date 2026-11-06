@@ -327,6 +327,40 @@ def is_local_snapshot_path(value: str | None) -> bool:
     return bool(value and LOCAL_PATH_RE.match(str(value).strip()))
 
 
+def _list_snapshots_from_base(base: Path) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    if not base.is_dir():
+        return items
+    date_dirs = [p for p in base.iterdir() if p.is_dir() and _DATE_DIR.match(p.name)]
+    for date_dir in sorted(date_dirs, reverse=True):
+        time_dirs = [p for p in date_dir.iterdir() if p.is_dir() and _TIME_DIR.match(p.name)]
+        for time_dir in sorted(time_dirs, reverse=True):
+            page_json = time_dir / "page.json"
+            if not page_json.is_file():
+                continue
+            local_path = f"{date_dir.name}/{time_dir.name}"
+            try:
+                data = json.loads(page_json.read_text(encoding="utf-8"))
+            except Exception:
+                data = {}
+            fetched = data.get("fetchedAt")
+            if not fetched:
+                try:
+                    fetched = datetime.strptime(f"{date_dir.name} {time_dir.name}", "%Y-%m-%d %H-%M-%S").isoformat()
+                except Exception:
+                    fetched = None
+            items.append(
+                {
+                    "id": local_path,
+                    "localPath": local_path,
+                    "capturedAt": fetched,
+                    "title": data.get("title"),
+                    "attachmentCount": len(data.get("attachments") or []),
+                }
+            )
+    return items
+
+
 def list_local_snapshots(url: str, check_name: str | None = None) -> list[dict[str, Any]]:
     """Read dated snapshot folders: results/<site>/<YYYY-MM-DD>/<HH-MM-SS>/page.json."""
     items: list[dict[str, Any]] = []
@@ -336,39 +370,136 @@ def list_local_snapshots(url: str, check_name: str | None = None) -> list[dict[s
     if name:
         bases.append(site_dir(url))
     for base in bases:
-        if not base.is_dir():
-            continue
-        date_dirs = [p for p in base.iterdir() if p.is_dir() and _DATE_DIR.match(p.name)]
-        for date_dir in sorted(date_dirs, reverse=True):
-            time_dirs = [p for p in date_dir.iterdir() if p.is_dir() and _TIME_DIR.match(p.name)]
-            for time_dir in sorted(time_dirs, reverse=True):
-                page_json = time_dir / "page.json"
-                if not page_json.is_file():
-                    continue
-                local_path = f"{date_dir.name}/{time_dir.name}"
-                if local_path in seen:
-                    continue
-                seen.add(local_path)
-                try:
-                    data = json.loads(page_json.read_text(encoding="utf-8"))
-                except Exception:
-                    data = {}
-                fetched = data.get("fetchedAt")
-                if not fetched:
-                    try:
-                        fetched = datetime.strptime(f"{date_dir.name} {time_dir.name}", "%Y-%m-%d %H-%M-%S").isoformat()
-                    except Exception:
-                        fetched = None
-                items.append(
-                    {
-                        "id": local_path,
-                        "localPath": local_path,
-                        "capturedAt": fetched,
-                        "title": data.get("title"),
-                        "attachmentCount": len(data.get("attachments") or []),
-                    }
-                )
+        for item in _list_snapshots_from_base(base):
+            path = str(item.get("localPath") or "")
+            if path in seen:
+                continue
+            seen.add(path)
+            items.append(item)
     return items
+
+
+def _latest_error_from_base(base: Path) -> dict[str, Any] | None:
+    latest: dict[str, Any] | None = None
+    latest_key = ""
+    if not base.is_dir():
+        return None
+    date_dirs = [p for p in base.iterdir() if p.is_dir() and _DATE_DIR.match(p.name)]
+    for date_dir in date_dirs:
+        time_dirs = [p for p in date_dir.iterdir() if p.is_dir() and _TIME_DIR.match(p.name)]
+        for time_dir in time_dirs:
+            error_json = time_dir / "error.json"
+            if not error_json.is_file():
+                continue
+            local_path = f"{date_dir.name}/{time_dir.name}"
+            try:
+                data = json.loads(error_json.read_text(encoding="utf-8"))
+            except Exception:
+                data = {"error": None, "localPath": local_path}
+            key = str(data.get("failedAt") or local_path)
+            if key >= latest_key:
+                latest_key = key
+                latest = data
+    return latest
+
+
+def list_sites() -> list[dict[str, Any]]:
+    """Build the left-list payload from results/<site>/ dated folders."""
+    root = Path(settings.results_dir)
+    if not root.is_dir():
+        return []
+    sites: list[dict[str, Any]] = []
+    for entry in root.iterdir():
+        if not entry.is_dir():
+            continue
+        latest = _latest_page_json(entry)
+        latest_err = _latest_error_from_base(entry)
+        url = (latest or {}).get("url") or (latest_err or {}).get("url")
+        if not url:
+            continue
+        snapshots = _list_snapshots_from_base(entry)
+        last_ok = True
+        last_action = "download"
+        last_error = None
+        if latest_err:
+            err_key = str(latest_err.get("failedAt") or latest_err.get("localPath") or "")
+            snap_key = str((latest or {}).get("fetchedAt") or (latest or {}).get("localPath") or "")
+            if not latest or err_key >= snap_key:
+                last_ok = False
+                last_action = latest_err.get("action") or "download"
+                last_error = latest_err.get("error")
+        sites.append(
+            {
+                "id": entry.name,
+                "url": url,
+                "title": (latest or {}).get("title"),
+                "checkName": normalize_check_name(
+                    (latest or {}).get("checkName") or (latest_err or {}).get("checkName")
+                ),
+                "created_at": None,
+                "updated_at": (latest or {}).get("fetchedAt") or (latest_err or {}).get("failedAt"),
+                "attachment_count": snapshots[0]["attachmentCount"] if snapshots else 0,
+                "lastAction": last_action,
+                "lastOk": last_ok,
+                "lastError": last_error,
+                "pageId": None,
+                "snapshots": snapshots,
+            }
+        )
+    sites.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+    return sites
+
+
+def delete_site_dir(folder_name: str) -> bool:
+    root = Path(settings.results_dir).resolve()
+    base = (Path(settings.results_dir) / folder_name).resolve()
+    try:
+        base.relative_to(root)
+    except Exception:
+        return False
+    if not base.is_dir() or base == root:
+        return False
+    shutil.rmtree(base, ignore_errors=True)
+    return True
+
+
+def save_error(url: str, error: str, *, action: str, check_name: str | None = None) -> Path:
+    """Write results/<site>/<YYYY-MM-DD>/<HH-MM-SS>/error.json for a failed read."""
+    name = normalize_check_name(check_name)
+    captured_at = datetime.now(timezone.utc)
+    local_path = _format_local_path(captured_at)
+    folder = snapshot_dir(url, local_path=local_path, check_name=name)
+    folder.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "url": url,
+        "checkName": name,
+        "action": action,
+        "error": str(error),
+        "failedAt": captured_at.astimezone().isoformat(),
+        "localPath": local_path,
+    }
+    path = folder / "error.json"
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+def load_latest_error(url: str, check_name: str | None = None) -> dict[str, Any] | None:
+    """Return the newest error.json under the site folder, or None."""
+    name = normalize_check_name(check_name)
+    bases = [site_dir(url, name)]
+    if name:
+        bases.append(site_dir(url))
+    latest: dict[str, Any] | None = None
+    latest_key = ""
+    for base in bases:
+        found = _latest_error_from_base(base)
+        if not found:
+            continue
+        key = str(found.get("failedAt") or found.get("localPath") or "")
+        if key >= latest_key:
+            latest_key = key
+            latest = found
+    return latest
 
 
 def load_snapshot(url: str, local_path: str | None = None, check_name: str | None = None) -> dict[str, Any] | None:
