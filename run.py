@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shlex
 import shutil
 import signal
 import socket
@@ -18,8 +19,6 @@ VENV_PYTHON = ROOT / ".venv" / "bin" / "python"
 BACKEND_DIR = ROOT / "backend"
 FRONTEND_DIR = ROOT / "frontend"
 PLAYWRIGHT_BROWSERS = ROOT / ".playwright-browsers"
-
-PROCESSES: list[subprocess.Popen] = []
 
 
 def require_cmd(name: str) -> str:
@@ -134,87 +133,68 @@ def ensure_frontend_deps() -> None:
     run_checked(["npm", "install"], cwd=FRONTEND_DIR)
 
 
-def start(
-    args: list[str], cwd: Path, env: dict[str, str] | None = None
-) -> subprocess.Popen:
-    merged = os.environ.copy()
-    if env:
-        merged.update(env)
-    proc = subprocess.Popen(args, cwd=cwd, env=merged, start_new_session=True)
-    PROCESSES.append(proc)
-    return proc
-
-
-def stop_all(*_args) -> None:
-    for proc in PROCESSES:
-        if proc.poll() is not None:
-            continue
-        try:
-            os.killpg(proc.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            continue
-    for proc in PROCESSES:
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+def open_bash_window(title: str, cwd: Path, command: str) -> None:
+    inner = (
+        f"printf '\\033]0;{title}\\007'; "
+        f"cd {shlex.quote(str(cwd))} && {command}"
+    )
+    result = subprocess.run(
+        [
+            "osascript",
+            "-e",
+            "on run argv",
+            "-e",
+            'tell application "Terminal"',
+            "-e",
+            "activate",
+            "-e",
+            "do script (item 1 of argv)",
+            "-e",
+            "end tell",
+            "-e",
+            "end run",
+            "--",
+            f"bash -lc {shlex.quote(inner)}",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        print(result.stderr.strip() or "Не удалось открыть окно Terminal.", file=sys.stderr)
+        sys.exit(result.returncode)
 
 
 def main() -> None:
     require_cmd("node")
     require_cmd("npm")
     require_cmd("lsof")
+    require_cmd("osascript")
     ensure_backend_deps()
     ensure_playwright()
     ensure_frontend_deps()
 
-    print("Backend: http://127.0.0.1:8000")
-    print("Frontend: http://localhost:3000")
-    print("Stop в VS Code / Ctrl+C останавливает оба процесса.")
-
+    print("Открываю backend и frontend в отдельных окнах bash...")
     free_port(8000)
     free_port(3000)
 
-    start(
-        [
-            str(VENV_PYTHON),
-            "-m",
-            "uvicorn",
-            "app.main:app",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            "8000",
-        ],
-        cwd=BACKEND_DIR,
-        env={"PLAYWRIGHT_BROWSERS_PATH": str(PLAYWRIGHT_BROWSERS)},
+    api_url = os.environ.get("NEXT_PUBLIC_API_URL", "http://127.0.0.1:8000")
+    open_bash_window(
+        "WebDelta backend",
+        BACKEND_DIR,
+        (
+            f"export PLAYWRIGHT_BROWSERS_PATH={shlex.quote(str(PLAYWRIGHT_BROWSERS))} && "
+            f"{shlex.quote(str(VENV_PYTHON))} -m uvicorn app.main:app --host 127.0.0.1 --port 8000"
+        ),
     )
-    start(
-        ["npm", "run", "dev"],
-        cwd=FRONTEND_DIR,
-        env={
-            "NEXT_PUBLIC_API_URL": os.environ.get(
-                "NEXT_PUBLIC_API_URL", "http://127.0.0.1:8000"
-            )
-        },
+    open_bash_window(
+        "WebDelta frontend",
+        FRONTEND_DIR,
+        f"export NEXT_PUBLIC_API_URL={shlex.quote(api_url)} && npm run dev",
     )
 
-    signal.signal(signal.SIGINT, stop_all)
-    signal.signal(signal.SIGTERM, stop_all)
-
-    exit_code = 0
-    try:
-        for proc in PROCESSES:
-            code = proc.wait()
-            if code not in (0, None, -signal.SIGTERM):
-                exit_code = code or 1
-            stop_all()
-    finally:
-        stop_all()
-    sys.exit(exit_code)
+    print("Backend: http://127.0.0.1:8000")
+    print("Frontend: http://localhost:3000")
+    print("Логи идут в двух окнах Terminal. Закройте окно, чтобы остановить сервис.")
 
 
 if __name__ == "__main__":

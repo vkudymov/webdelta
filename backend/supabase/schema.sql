@@ -12,6 +12,21 @@ create table if not exists public.pages (
 
 create index if not exists idx_pages_url on public.pages (url);
 
+create table if not exists public.url_history (
+  id bigserial primary key,
+  url text not null unique,
+  title text,
+  last_action text not null,
+  last_ok boolean not null default false,
+  last_error text,
+  page_id bigint references public.pages(id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists idx_url_history_url on public.url_history (url);
+create index if not exists idx_url_history_updated_at on public.url_history (updated_at desc);
+
 create table if not exists public.snapshots (
   id bigserial primary key,
   page_id bigint not null references public.pages(id) on delete cascade,

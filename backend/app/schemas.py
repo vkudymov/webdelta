@@ -112,6 +112,10 @@ class PageListItem(BaseModel):
     created_at: datetime | str | None = None
     updated_at: datetime | str | None = None
     attachment_count: int = 0
+    lastAction: str | None = None
+    lastOk: bool | None = None
+    lastError: str | None = None
+    pageId: int | str | None = None
 
 
 class ListResponse(BaseModel):

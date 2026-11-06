@@ -4,7 +4,19 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "../hooks/useTranslation";
 import { apiFetch } from "../lib/api";
 
-export default function SavedPages({ onSelectPage, refreshToken }) {
+function statusLabel(page, t) {
+  if (!page.lastOk) return t("statusError");
+  if (page.lastAction === "compare") return t("statusCompared");
+  return t("statusSaved");
+}
+
+function statusClass(page) {
+  if (!page.lastOk) return "bg-red-100 text-red-700";
+  if (page.lastAction === "compare") return "bg-indigo-100 text-indigo-700";
+  return "bg-green-100 text-green-700";
+}
+
+export default function SavedPages({ onSelectPage, refreshToken, currentUrl }) {
   const { t } = useTranslation();
   const [pages, setPages] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -36,87 +48,63 @@ export default function SavedPages({ onSelectPage, refreshToken }) {
     }
   };
 
-  if (loading) {
-    return (
-      <div className="bg-white rounded-2xl shadow-xl p-6">
-        <h2 className="text-xl font-semibold text-gray-800 mb-4">{t("savedPages")}</h2>
+  return (
+    <aside className="bg-white rounded-2xl shadow-xl p-4 h-fit sticky top-4 max-h-[calc(100vh-6rem)] overflow-y-auto">
+      <h2 className="text-lg font-semibold text-gray-800 mb-3">{t("siteList")}</h2>
+
+      {loading && (
         <div className="flex justify-center py-8">
           <div className="loading-spinner" />
         </div>
-      </div>
-    );
-  }
+      )}
 
-  if (pages.length === 0) {
-    return (
-      <div className="bg-white rounded-2xl shadow-xl p-6">
-        <h2 className="text-xl font-semibold text-gray-800 mb-4">{t("savedPages")}</h2>
-        <p className="text-center text-gray-500 py-8">{t("noDataYet")}</p>
-      </div>
-    );
-  }
+      {!loading && pages.length === 0 && (
+        <p className="text-sm text-center text-gray-500 py-6">{t("siteListEmpty")}</p>
+      )}
 
-  return (
-    <div className="bg-white rounded-2xl shadow-xl p-6">
-      <h2 className="text-xl font-semibold text-gray-800 mb-4">{t("savedPages")}</h2>
-
-      <div className="space-y-3">
-        {pages.map((page) => (
-          <div
-            key={page.id}
-            className="border rounded-xl p-4 hover:border-blue-300 hover:bg-blue-50/50 transition-all group"
-          >
-            <div className="flex items-start justify-between gap-4">
-              <div className="flex-1 min-w-0">
-                <h3 className="font-medium text-gray-800 truncate">{page.title || page.url}</h3>
-                <p
-                  className="text-sm text-blue-600 truncate cursor-pointer hover:underline"
+      {!loading && pages.length > 0 && (
+        <div className="space-y-2">
+          {pages.map((page) => {
+            const active = currentUrl && currentUrl.trim() === page.url;
+            return (
+              <div
+                key={page.id}
+                className={`border rounded-xl p-3 transition-all group ${
+                  active ? "border-blue-400 bg-blue-50" : "hover:border-blue-300 hover:bg-blue-50/50"
+                }`}
+              >
+                <button
+                  type="button"
                   onClick={() => onSelectPage(page.url)}
+                  className="w-full text-left"
                 >
-                  {page.url}
-                </p>
-                <div className="flex items-center gap-4 mt-2 text-xs text-gray-500">
-                  <span>{t("savedAt")}: {page.updated_at ? new Date(page.updated_at).toLocaleString() : "—"}</span>
-                  <span className="flex items-center gap-1">
-                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <div className="font-medium text-gray-800 truncate text-sm">{page.title || page.url}</div>
+                  <div className="text-xs text-blue-600 truncate">{page.url}</div>
+                </button>
+                <div className="flex items-center justify-between gap-2 mt-2">
+                  <span className={`text-[11px] px-2 py-0.5 rounded-full ${statusClass(page)}`}>
+                    {statusLabel(page, t)}
+                  </span>
+                  <button
+                    onClick={() => setDeleteConfirm(page.id)}
+                    className="p-1 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                    aria-label={t("delete")}
+                  >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path
                         strokeLinecap="round"
                         strokeLinejoin="round"
                         strokeWidth={2}
-                        d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13"
+                        d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
                       />
                     </svg>
-                    {page.attachment_count} {t("attachmentsFound").toLowerCase()}
-                  </span>
+                  </button>
                 </div>
               </div>
-
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={() => onSelectPage(page.url)}
-                  className="px-3 py-1.5 text-sm font-medium text-blue-600 bg-blue-100 rounded-lg hover:bg-blue-200 transition-colors"
-                >
-                  {t("compareWithOriginal")}
-                </button>
-                <button
-                  onClick={() => setDeleteConfirm(page.id)}
-                  className="p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
-                  aria-label={t("delete")}
-                >
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      strokeWidth={2}
-                      d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
-                    />
-                  </svg>
-                </button>
-              </div>
-            </div>
-          </div>
-        ))}
-      </div>
+            );
+          })}
+        </div>
+      )}
 
       {deleteConfirm && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
@@ -139,7 +127,6 @@ export default function SavedPages({ onSelectPage, refreshToken }) {
           </div>
         </div>
       )}
-    </div>
+    </aside>
   );
 }
-

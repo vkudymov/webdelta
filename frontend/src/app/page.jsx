@@ -110,6 +110,7 @@ function AppContent() {
       }
 
       if (!res.ok) {
+        setPagesRefreshToken((x) => x + 1);
         throw new Error(data.error || t("networkError"));
       }
 
@@ -122,6 +123,7 @@ function AppContent() {
       setPagesRefreshToken((x) => x + 1);
       await refreshSnapshots(url);
     } catch (error) {
+      setPagesRefreshToken((x) => x + 1);
       showNotification("error", error.message);
     } finally {
       setLoading(false);
@@ -146,12 +148,14 @@ function AppContent() {
       });
 
       if (!res.ok) {
+        setPagesRefreshToken((x) => x + 1);
         if (res.status === 404) throw new Error(t("noSavedVersion"));
         throw new Error(data.error || t("networkError"));
       }
 
       setComparison(data.comparison);
       setShowDelta(false);
+      setPagesRefreshToken((x) => x + 1);
 
       const summary = data.comparison?.summary;
       if (
@@ -165,6 +169,7 @@ function AppContent() {
         showNotification("success", t("noChanges"));
       }
     } catch (error) {
+      setPagesRefreshToken((x) => x + 1);
       showNotification("error", error.message);
     } finally {
       setLoading(false);
@@ -186,44 +191,46 @@ function AppContent() {
     <div className="min-h-screen bg-gradient-to-br from-slate-50 to-blue-50">
       <Header />
 
-      <main className="max-w-6xl mx-auto px-4 py-8">
-        <div className="bg-white rounded-2xl shadow-xl p-6 mb-6">
-          <UrlInput url={url} onChange={setUrl} disabled={loading} />
+      <main className="max-w-7xl mx-auto px-4 py-8 grid grid-cols-1 md:grid-cols-[280px_minmax(0,1fr)] gap-6 items-start">
+        <SavedPages onSelectPage={handleSelectPage} refreshToken={pagesRefreshToken} currentUrl={url} />
 
-          {snapshots.length > 0 && (
-            <div className="mt-4 flex items-center gap-3">
-              <div className="text-sm text-gray-600">{t("snapshotVersion")}:</div>
-              <select
-                className="border rounded-lg px-3 py-2 text-sm bg-white"
-                value={selectedSnapshotId ?? ""}
-                onChange={(e) => setSelectedSnapshotId(e.target.value ? e.target.value : null)}
-                disabled={loading}
-              >
-                <option value="">{t("latestSnapshot")}</option>
-                {snapshots.map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.capturedAt ? new Date(s.capturedAt).toLocaleString() : s.id}
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
+        <div>
+          <div className="bg-white rounded-2xl shadow-xl p-6 mb-6">
+            <UrlInput url={url} onChange={setUrl} disabled={loading} />
 
-          <ActionButtons
-            onDownload={() => handleDownload(false)}
-            onCompare={handleCompare}
-            onShowDelta={handleShowDelta}
-            loading={loading}
-            loadingAction={loadingAction}
-            hasComparison={!!comparison}
-          />
+            {snapshots.length > 0 && (
+              <div className="mt-4 flex items-center gap-3">
+                <div className="text-sm text-gray-600">{t("snapshotVersion")}:</div>
+                <select
+                  className="border rounded-lg px-3 py-2 text-sm bg-white"
+                  value={selectedSnapshotId ?? ""}
+                  onChange={(e) => setSelectedSnapshotId(e.target.value ? e.target.value : null)}
+                  disabled={loading}
+                >
+                  <option value="">{t("latestSnapshot")}</option>
+                  {snapshots.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.capturedAt ? new Date(s.capturedAt).toLocaleString() : s.id}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            <ActionButtons
+              onDownload={() => handleDownload(false)}
+              onCompare={handleCompare}
+              onShowDelta={handleShowDelta}
+              loading={loading}
+              loadingAction={loadingAction}
+              hasComparison={!!comparison}
+            />
+          </div>
+
+          {comparison && showDelta && <DiffViewer comparison={comparison} />}
+
+          {comparison && !showDelta && <StatsPanel comparison={comparison} />}
         </div>
-
-        {comparison && showDelta && <DiffViewer comparison={comparison} />}
-
-        {comparison && !showDelta && <StatsPanel comparison={comparison} />}
-
-        <SavedPages onSelectPage={handleSelectPage} refreshToken={pagesRefreshToken} />
       </main>
 
       {notification && (

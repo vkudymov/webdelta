@@ -87,6 +87,45 @@ async def _persist_snapshot(repo, url: str, snapshot: dict, fetched_attachments:
     return page_id, snapshot_id, len(attachments_to_insert)
 
 
+async def _mark_history(
+    repo,
+    url: str,
+    action: str,
+    ok: bool,
+    error: str | None = None,
+    title: str | None = None,
+    page_id=None,
+):
+    await repo.upsert_history(
+        url,
+        last_action=action,
+        last_ok=ok,
+        last_error=(error[:500] if error else None),
+        title=title,
+        page_id=page_id,
+    )
+
+
+def _history_item(row: dict) -> dict:
+    last_ok = row.get("last_ok")
+    if last_ok is None:
+        last_ok = row.get("lastOk")
+    if isinstance(last_ok, int):
+        last_ok = bool(last_ok)
+    return {
+        "id": row.get("id"),
+        "url": row.get("url"),
+        "title": row.get("title"),
+        "created_at": row.get("created_at"),
+        "updated_at": row.get("updated_at"),
+        "attachment_count": int(row.get("attachment_count") or 0),
+        "lastAction": row.get("last_action") or row.get("lastAction"),
+        "lastOk": last_ok,
+        "lastError": row.get("last_error") or row.get("lastError"),
+        "pageId": row.get("page_id") if row.get("page_id") is not None else row.get("pageId"),
+    }
+
+
 @router.get("/check", response_model=CheckResponse)
 async def check(url: str, request: Request):
     if not url:
@@ -123,6 +162,8 @@ async def download(body: DownloadRequest, request: Request):
 
     repo = _repo(request)
     existing = await repo.get_page_by_url(url)
+    existing_id = existing["id"] if existing else None
+    await _mark_history(repo, url, "download", False, page_id=existing_id)
 
     browser = _browser(request)
     try:
@@ -130,6 +171,7 @@ async def download(body: DownloadRequest, request: Request):
         attachment_links = extract_attachment_links(rendered["html"], url)
         current_attachments = await fetch_attachments(attachment_links)
     except Exception as exc:
+        await _mark_history(repo, url, "download", False, error=str(exc), page_id=existing_id)
         return JSONResponse(status_code=500, content={"error": str(exc)})
 
     snapshot = comparison_snapshot(url, rendered.get("title"), rendered.get("content"), current_attachments)
@@ -137,9 +179,11 @@ async def download(body: DownloadRequest, request: Request):
     save_legacy_snapshot(url, snapshot)
     stored = load_snapshot(url)
     if stored is None:
+        await _mark_history(repo, url, "download", False, error="Failed to read saved snapshot", page_id=existing_id)
         return JSONResponse(status_code=500, content={"error": "Failed to read saved snapshot"})
 
     page_id, snapshot_id, attachment_count = await _persist_snapshot(repo, url, stored, current_attachments, existing)
+    await _mark_history(repo, url, "download", True, title=stored.get("title"), page_id=page_id)
     return {
         "success": True,
         "message": "Page saved",
@@ -159,7 +203,10 @@ async def compare(body: CompareRequest, request: Request):
 
     repo = _repo(request)
     saved = await repo.get_page_by_url(url)
+    saved_id = saved["id"] if saved else None
+    await _mark_history(repo, url, "compare", False, page_id=saved_id)
     if not saved:
+        await _mark_history(repo, url, "compare", False, error="No saved version found for this URL")
         return JSONResponse(status_code=404, content={"error": "No saved version found for this URL"})
 
     snap_row = None
@@ -168,6 +215,7 @@ async def compare(body: CompareRequest, request: Request):
         if candidate and str(candidate.get("page_id")) == str(saved["id"]):
             snap_row = candidate
         else:
+            await _mark_history(repo, url, "compare", False, error="Snapshot not found", page_id=saved_id)
             return JSONResponse(status_code=404, content={"error": "Snapshot not found"})
     else:
         snap_row = await repo.get_latest_snapshot(saved["id"])
@@ -194,12 +242,17 @@ async def compare(body: CompareRequest, request: Request):
         except Exception:
             snapshot["attachments"] = []
     if snapshot is None:
+        await _mark_history(repo, url, "compare", False, error="Failed to load saved snapshot", page_id=saved_id)
         return JSONResponse(status_code=500, content={"error": "Failed to load saved snapshot"})
 
     browser = _browser(request)
-    current = await fetch_page_rendered(browser, url)
-    current_links = extract_attachment_links(current["html"], url)
-    current_attachments = await fetch_attachments(current_links)
+    try:
+        current = await fetch_page_rendered(browser, url)
+        current_links = extract_attachment_links(current["html"], url)
+        current_attachments = await fetch_attachments(current_links)
+    except Exception as exc:
+        await _mark_history(repo, url, "compare", False, error=str(exc), page_id=saved_id)
+        return JSONResponse(status_code=500, content={"error": str(exc)})
 
     text_diff = compare_texts(snapshot.get("content") or "", current.get("content") or "")
 
@@ -340,14 +393,22 @@ async def compare(body: CompareRequest, request: Request):
             msg = str(exc).strip() or type(exc).__name__
             comparison["explanationError"] = msg[:500]
 
+    await _mark_history(
+        repo,
+        url,
+        "compare",
+        True,
+        title=current.get("title") or snapshot.get("title"),
+        page_id=saved_id,
+    )
     return {"success": True, "comparison": comparison}
 
 
 @router.get("/list", response_model=ListResponse)
 async def list_pages(request: Request):
     repo = _repo(request)
-    pages = await repo.list_pages()
-    return {"pages": pages}
+    rows = await repo.list_history()
+    return {"pages": [_history_item(r) for r in rows]}
 
 @router.get("/snapshots", response_model=SnapshotsResponse)
 async def list_snapshots(url: str, request: Request):
@@ -383,6 +444,16 @@ async def list_pages_alias(request: Request):
 @router.delete("/{page_id}")
 async def delete(page_id: str, request: Request):
     repo = _repo(request)
+    hist = await repo.get_history_by_id(page_id)
+    if hist:
+        page = await repo.get_page_by_id(hist.get("page_id")) if hist.get("page_id") is not None else None
+        if page:
+            delete_snapshot(page["url"])
+            delete_legacy_snapshot(page["url"])
+            await repo.delete_page(page["id"])
+        await repo.delete_history(hist["id"])
+        return {"success": True, "message": "Page deleted"}
+
     page = await repo.get_page_by_id(page_id)
     if not page:
         return JSONResponse(status_code=404, content={"error": "Page not found"})
