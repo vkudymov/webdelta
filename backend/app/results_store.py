@@ -142,6 +142,23 @@ def files_dir(
 ) -> Path:
     return snapshot_dir(url, local_path=local_path, captured_at=captured_at, check_name=check_name) / "files"
 
+
+def count_files_under_snapshot_dir(snapshot_path: Path) -> int:
+    """All files under a snapshot folder (recursive), same notion as Finder 'objects' when only files are present."""
+    if not snapshot_path.is_dir():
+        return 0
+    return sum(1 for p in snapshot_path.rglob("*") if p.is_file())
+
+
+def count_snapshot_disk_files(
+    url: str,
+    *,
+    local_path: str | None = None,
+    check_name: str | None = None,
+) -> int:
+    return count_files_under_snapshot_dir(snapshot_dir(url, local_path=local_path, check_name=check_name))
+
+
 def attachment_path(
     url: str,
     rel_path: str,
@@ -355,7 +372,7 @@ def _list_snapshots_from_base(base: Path) -> list[dict[str, Any]]:
                     "localPath": local_path,
                     "capturedAt": fetched,
                     "title": data.get("title"),
-                    "attachmentCount": len(data.get("attachments") or []),
+                    "attachmentCount": count_files_under_snapshot_dir(time_dir),
                 }
             )
     return items

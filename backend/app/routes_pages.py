@@ -1,16 +1,24 @@
 from __future__ import annotations
 
+import hashlib
+import json
+from collections import defaultdict
+from pathlib import Path
+
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from .diffing import compare_attachment_text, compare_texts, is_text_content_type
+from .diffing import compare_texts, is_text_content_type
+from .document_text import extract_document_text
 from .fetcher import fetch_page_rendered, sanitize_storage_filename
 from .results_store import (
     comparison_snapshot,
+    count_snapshot_disk_files,
     delete_legacy_snapshot,
     delete_site_dir,
     delete_site_snapshot,
     delete_snapshot,
+    files_dir,
     is_local_snapshot_path,
     list_local_snapshots,
     list_sites,
@@ -184,6 +192,15 @@ def _resolve_check_name(raw: str | None, existing: dict | None = None) -> str | 
     return normalize_check_name(existing.get("check_name") or existing.get("checkName"))
 
 
+def _snapshot_files_on_disk(url: str, local_path: str | None, check_name: str | None) -> int | None:
+    if not local_path or not is_local_snapshot_path(str(local_path)):
+        return None
+    try:
+        return count_snapshot_disk_files(url, local_path=str(local_path).strip(), check_name=check_name)
+    except Exception:
+        return None
+
+
 def _snapshot_item(row: dict) -> dict:
     local_path = row.get("local_path") or row.get("localPath")
     return {
@@ -209,12 +226,13 @@ def _merge_snapshots(db_rows: list[dict], file_items: list[dict]) -> list[dict]:
     for item in file_items:
         path = str(item.get("localPath") or "")
         db_item = by_path.get(path) if path else None
+        disk_count = int(item.get("attachmentCount") or 0)
         merged.append(
             {
                 "id": (db_item or {}).get("id") if db_item and db_item.get("id") is not None else (item.get("id") or path),
                 "capturedAt": item.get("capturedAt") or (db_item or {}).get("capturedAt"),
                 "title": item.get("title") or (db_item or {}).get("title"),
-                "attachmentCount": int(item.get("attachmentCount") or (db_item or {}).get("attachmentCount") or 0),
+                "attachmentCount": disk_count if disk_count > 0 else int((db_item or {}).get("attachmentCount") or 0),
                 "localPath": path or None,
             }
         )
@@ -275,12 +293,223 @@ def _attachment_bytes(url: str, att: dict, local_path: str | None, check_name: s
     return read_attachment_bytes(url, rel, check_name=check_name)
 
 
+def _attachment_name(att: dict) -> str:
+    raw = str(att.get("filename") or "unnamed").replace("\\", "/").split("/")[-1].strip()
+    return raw or "unnamed"
+
+
+def _attachment_type(att: dict) -> str:
+    ext = Path(_attachment_name(att)).suffix.lower()
+    if ext:
+        return ext
+    return str(att.get("content_type") or att.get("contentType") or "")
+
+
+def _attachment_match_key(att: dict) -> str:
+    name = _attachment_name(att)
+    stem, dot, ext = name.rpartition(".")
+    if not stem:
+        return name.casefold()
+    return f"{stem.casefold()}.{ext.casefold()}"
+
+
+def _content_hash(data: bytes | None, att: dict) -> str:
+    if data is not None:
+        return hashlib.md5(data).hexdigest()
+    return str(att.get("hash") or "")
+
+
+def _summary_row(att: dict) -> dict:
+    return {
+        "url": att.get("url") or "",
+        "filename": _attachment_name(att),
+        "contentType": att.get("content_type") or att.get("contentType"),
+        "fileType": _attachment_type(att) or None,
+        "size": att.get("size"),
+    }
+
+
+def _row_match_key(row: dict) -> str:
+    return _attachment_match_key({"filename": row.get("filename") or "unnamed"})
+
+
+def _scan_files_subdir_keys(
+    url: str, local_path: str | None, check_name: str | None
+) -> tuple[set[str], dict[str, str]]:
+    """
+    Filenames in snapshot .../files/ (flat), keyed by the same match rule as attachments.
+    Returns (set of keys, key -> display filename).
+    """
+    keys: set[str] = set()
+    key_to_name: dict[str, str] = {}
+    if not local_path or not is_local_snapshot_path(str(local_path).strip()):
+        return keys, key_to_name
+    try:
+        d = files_dir(url, local_path=str(local_path).strip(), check_name=check_name)
+    except Exception:
+        return keys, key_to_name
+    if not d.is_dir():
+        return keys, key_to_name
+    for p in d.iterdir():
+        if not p.is_file() or p.name == ".DS_Store":
+            continue
+        key = _attachment_match_key({"filename": p.name})
+        keys.add(key)
+        key_to_name.setdefault(key, p.name)
+    return keys, key_to_name
+
+
+def _synthetic_summary_from_disk_file(
+    url: str, local_path: str, check_name: str | None, filename: str
+) -> dict:
+    att = {"url": "", "filename": filename, "content_type": None, "contentType": None}
+    try:
+        p = files_dir(url, local_path=local_path, check_name=check_name) / filename
+        if p.is_file():
+            att["size"] = p.stat().st_size
+    except Exception:
+        pass
+    return _summary_row(att)
+
+
+def _merge_disk_filename_only_diff(
+    url: str,
+    left_path: str | None,
+    right_path: str | None,
+    check_name: str | None,
+    added: list[dict],
+    removed: list[dict],
+    modified: list[dict],
+    unchanged: list[dict],
+) -> tuple[list[dict], list[dict], list[dict], list[dict]]:
+    """
+    When page.json attachments disagree with saved files under files/, list files present only
+    on one side's disk so UI filters (only left / only right) match Finder counts.
+    """
+    if (
+        not left_path
+        or not right_path
+        or not is_local_snapshot_path(str(left_path).strip())
+        or not is_local_snapshot_path(str(right_path).strip())
+    ):
+        return added, removed, modified, unchanged
+
+    lp = str(left_path).strip()
+    rp = str(right_path).strip()
+    left_keys, left_names = _scan_files_subdir_keys(url, lp, check_name)
+    right_keys, right_names = _scan_files_subdir_keys(url, rp, check_name)
+    only_on_right = right_keys - left_keys
+    only_on_left = left_keys - right_keys
+    if not only_on_right and not only_on_left:
+        return added, removed, modified, unchanged
+
+    def keys_in(rows: list[dict]) -> set[str]:
+        return {_row_match_key(r) for r in rows}
+
+    added_keys = keys_in(added)
+    removed_keys = keys_in(removed)
+
+    def move_to_added(row: dict) -> None:
+        k = _row_match_key(row)
+        if k in added_keys:
+            return
+        added.append(row)
+        added_keys.add(k)
+
+    def move_to_removed(row: dict) -> None:
+        k = _row_match_key(row)
+        if k in removed_keys:
+            return
+        removed.append(row)
+        removed_keys.add(k)
+
+    new_modified: list[dict] = []
+    for row in modified:
+        k = _row_match_key(row)
+        if k in only_on_right:
+            move_to_added(row)
+        elif k in only_on_left:
+            move_to_removed(row)
+        else:
+            new_modified.append(row)
+
+    new_unchanged: list[dict] = []
+    for row in unchanged:
+        k = _row_match_key(row)
+        if k in only_on_right:
+            move_to_added(row)
+        elif k in only_on_left:
+            move_to_removed(row)
+        else:
+            new_unchanged.append(row)
+
+    for k in only_on_right:
+        if k not in added_keys:
+            fn = right_names.get(k) or ""
+            if fn:
+                added.append(_synthetic_summary_from_disk_file(url, rp, check_name, fn))
+                added_keys.add(k)
+
+    for k in only_on_left:
+        if k not in removed_keys:
+            fn = left_names.get(k) or ""
+            if fn:
+                removed.append(_synthetic_summary_from_disk_file(url, lp, check_name, fn))
+                removed_keys.add(k)
+
+    return added, removed, new_modified, new_unchanged
+
+
+def _pair_attachments(left_items: list[dict], right_items: list[dict]) -> list[tuple[str, dict | None, dict | None]]:
+    grouped_left: dict[str, list[dict]] = defaultdict(list)
+    grouped_right: dict[str, list[dict]] = defaultdict(list)
+    for att in left_items:
+        grouped_left[_attachment_match_key(att)].append(att)
+    for att in right_items:
+        grouped_right[_attachment_match_key(att)].append(att)
+
+    pairs: list[tuple[str, dict | None, dict | None]] = []
+    seen: set[str] = set()
+    for att in left_items + right_items:
+        key = _attachment_match_key(att)
+        if key in seen:
+            continue
+        seen.add(key)
+        left_group = grouped_left.get(key) or []
+        right_group = grouped_right.get(key) or []
+        shared = min(len(left_group), len(right_group))
+        for index in range(shared):
+            pairs.append(("both", left_group[index], right_group[index]))
+        for att in left_group[shared:]:
+            pairs.append(("removed", att, None))
+        for att in right_group[shared:]:
+            pairs.append(("added", None, att))
+    return pairs
+
+
+def _file_text_diff(left_bytes: bytes | None, right_bytes: bytes | None, filename: str) -> tuple[dict | None, str | None]:
+    left_text, left_error = extract_document_text(left_bytes, filename)
+    right_text, right_error = extract_document_text(right_bytes, filename)
+    errors = [item for item in (left_error, right_error) if item and item != "file not found"]
+    if left_bytes is None or right_bytes is None:
+        missing = []
+        if left_bytes is None:
+            missing.append("version 1")
+        if right_bytes is None:
+            missing.append("version 2")
+        errors.append("file not found: " + ", ".join(missing))
+    if left_text is None or right_text is None:
+        return None, "; ".join(errors) or None
+    diff = compare_texts(left_text, right_text)
+    if len(diff["changes"]) > 400:
+        diff["changes"] = diff["changes"][:400]
+    return diff, "; ".join(errors) or None
+
+
 def _diff_snapshots(url: str, left: dict, right: dict, check_name: str | None) -> dict:
     text_diff = compare_texts(left.get("content") or "", right.get("content") or "")
     saved_attachments = list(left.get("attachments") or [])
     current_attachments = list(right.get("attachments") or [])
-    saved_map = {a.get("url"): a for a in saved_attachments if a.get("url")}
-    current_map = {a.get("url"): a for a in current_attachments if a.get("url")}
     left_path = left.get("localPath") or left.get("local_path")
     right_path = right.get("localPath") or right.get("local_path")
     name = check_name or left.get("checkName") or right.get("checkName")
@@ -290,97 +519,72 @@ def _diff_snapshots(url: str, left: dict, right: dict, check_name: str | None) -
     modified: list[dict] = []
     unchanged: list[dict] = []
 
-    for att_url, cur in current_map.items():
-        saved_att = saved_map.get(att_url)
-        ct = cur.get("content_type") or cur.get("contentType") or (saved_att.get("content_type") if saved_att else None)
-        if not saved_att:
-            added.append(
-                {
-                    "url": att_url,
-                    "filename": cur.get("filename") or "unnamed",
-                    "contentType": ct,
-                    "size": cur.get("size"),
-                }
-            )
+    for kind, saved_att, cur in _pair_attachments(saved_attachments, current_attachments):
+        if kind == "added" and cur is not None:
+            added.append(_summary_row(cur))
             continue
-
-        saved_hash = saved_att.get("hash") or ""
-        cur_hash = cur.get("hash") or ""
-        if saved_hash == cur_hash and saved_hash:
-            unchanged.append(
-                {
-                    "url": att_url,
-                    "filename": cur.get("filename") or saved_att.get("filename") or "unnamed",
-                    "contentType": ct,
-                    "size": cur.get("size"),
-                }
-            )
+        if kind == "removed" and saved_att is not None:
+            removed.append(_summary_row(saved_att))
             continue
-
-        if is_text_content_type(ct):
-            modified.append(
-                {
-                    "url": att_url,
-                    "filename": cur.get("filename") or saved_att.get("filename") or "unnamed",
-                    "contentType": ct,
-                    "oldSize": saved_att.get("size"),
-                    "newSize": cur.get("size"),
-                    "oldHash": saved_att.get("hash"),
-                    "newHash": cur.get("hash"),
-                    "textDiff": compare_attachment_text(saved_att.get("text_content"), cur.get("text_content")),
-                }
-            )
+        if saved_att is None or cur is None:
             continue
 
         saved_bytes = _attachment_bytes(url, saved_att, left_path, name)
         cur_bytes = _attachment_bytes(url, cur, right_path, name)
-        if saved_bytes is not None and cur_bytes is not None and saved_bytes == cur_bytes:
+        saved_hash = _content_hash(saved_bytes, saved_att)
+        cur_hash = _content_hash(cur_bytes, cur)
+        filename = _attachment_name(cur) if _attachment_name(cur) != "unnamed" else _attachment_name(saved_att)
+        row_type = _attachment_type(cur) or _attachment_type(saved_att) or None
+        content_type = cur.get("content_type") or cur.get("contentType") or saved_att.get("content_type")
+        if saved_hash and saved_hash == cur_hash:
             unchanged.append(
                 {
-                    "url": att_url,
-                    "filename": cur.get("filename") or saved_att.get("filename") or "unnamed",
-                    "contentType": ct,
-                    "size": cur.get("size"),
+                    "url": cur.get("url") or saved_att.get("url") or "",
+                    "filename": filename,
+                    "contentType": content_type,
+                    "fileType": row_type,
+                    "size": cur.get("size") if cur.get("size") is not None else saved_att.get("size"),
                 }
             )
-        elif (saved_bytes is None or cur_bytes is None) and saved_hash == cur_hash and saved_hash:
-            unchanged.append(
-                {
-                    "url": att_url,
-                    "filename": cur.get("filename") or saved_att.get("filename") or "unnamed",
-                    "contentType": ct,
-                    "size": cur.get("size"),
-                }
-            )
-        else:
-            modified.append(
-                {
-                    "url": att_url,
-                    "filename": cur.get("filename") or saved_att.get("filename") or "unnamed",
-                    "contentType": ct,
-                    "oldSize": saved_att.get("size"),
-                    "newSize": cur.get("size"),
-                    "oldHash": saved_att.get("hash"),
-                    "newHash": cur.get("hash"),
-                    "textDiff": None,
-                }
-            )
+            continue
 
-    for att_url, saved_att in saved_map.items():
-        if att_url not in current_map:
-            removed.append(
-                {
-                    "url": att_url,
-                    "filename": saved_att.get("filename") or "unnamed",
-                    "contentType": saved_att.get("content_type") or saved_att.get("contentType"),
-                    "size": saved_att.get("size"),
-                }
-            )
+        file_diff, read_error = _file_text_diff(saved_bytes, cur_bytes, filename)
+        modified.append(
+            {
+                "url": cur.get("url") or saved_att.get("url") or "",
+                "filename": filename,
+                "contentType": content_type,
+                "fileType": row_type,
+                "oldSize": saved_att.get("size") if saved_att.get("size") is not None else (len(saved_bytes) if saved_bytes is not None else None),
+                "newSize": cur.get("size") if cur.get("size") is not None else (len(cur_bytes) if cur_bytes is not None else None),
+                "oldHash": saved_hash or None,
+                "newHash": cur_hash or None,
+                "textDiff": file_diff,
+                "readError": read_error,
+            }
+        )
 
-    for a in current_attachments:
-        a.pop("bytes", None)
+    for att in saved_attachments + current_attachments:
+        att.pop("bytes", None)
+
+    added, removed, modified, unchanged = _merge_disk_filename_only_diff(
+        url,
+        left_path if isinstance(left_path, str) else None,
+        right_path if isinstance(right_path, str) else None,
+        name,
+        added,
+        removed,
+        modified,
+        unchanged,
+    )
 
     attachment_diffs = {"added": added, "removed": removed, "modified": modified, "unchanged": unchanged}
+
+    _files_left_disk = _snapshot_files_on_disk(url, left_path if isinstance(left_path, str) else None, name)
+    _files_right_disk = _snapshot_files_on_disk(url, right_path if isinstance(right_path, str) else None, name)
+    _summary_files_left = _files_left_disk if _files_left_disk is not None else len(saved_attachments)
+    _summary_files_right = _files_right_disk if _files_right_disk is not None else len(current_attachments)
+
     return {
         "url": url,
         "savedTitle": left.get("title"),
@@ -390,6 +594,8 @@ def _diff_snapshots(url: str, left: dict, right: dict, check_name: str | None) -
         "attachmentDiffs": attachment_diffs,
         "summary": {
             "textChanged": bool(text_diff.get("hasChanges")),
+            "filesLeft": _summary_files_left,
+            "filesRight": _summary_files_right,
             "attachmentsAdded": len(added),
             "attachmentsRemoved": len(removed),
             "attachmentsModified": len(modified),

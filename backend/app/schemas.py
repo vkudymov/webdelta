@@ -64,6 +64,7 @@ class AttachmentSummary(BaseModel):
     url: str
     filename: str
     contentType: str | None = None
+    fileType: str | None = None
     size: int | None = None
 
 
@@ -71,11 +72,13 @@ class AttachmentModified(BaseModel):
     url: str
     filename: str
     contentType: str | None = None
+    fileType: str | None = None
     oldSize: int | None = None
     newSize: int | None = None
     oldHash: str | None = None
     newHash: str | None = None
     textDiff: TextDiff | None = None
+    readError: str | None = None
 
 
 class AttachmentDiffs(BaseModel):
@@ -87,6 +90,8 @@ class AttachmentDiffs(BaseModel):
 
 class ComparisonSummary(BaseModel):
     textChanged: bool
+    filesLeft: int = 0
+    filesRight: int = 0
     attachmentsAdded: int = 0
     attachmentsRemoved: int = 0
     attachmentsModified: int = 0

@@ -12,6 +12,7 @@ import { LocaleProvider } from "../lib/locale";
 import { StorageProvider, useStorageSource } from "../lib/storage";
 import { useTranslation } from "../hooks/useTranslation";
 import { apiFetch } from "../lib/api";
+import { formatSnapshotLabel } from "../lib/snapshotLabel";
 
 function AppContent() {
   const { t, locale } = useTranslation();
@@ -259,9 +260,13 @@ function AppContent() {
             />
           </div>
 
-          {comparison && showDelta && <DiffViewer comparison={comparison} />}
-
-          {comparison && !showDelta && <StatsPanel comparison={comparison} />}
+          {comparison && showDelta && (
+            <DiffViewer
+              comparison={comparison}
+              versionLeftLabel={formatSnapshotLabel(versionA?.snapshotId)}
+              versionRightLabel={formatSnapshotLabel(versionB?.snapshotId)}
+            />
+          )}
         </div>
       </main>
 
@@ -277,61 +282,6 @@ function AppContent() {
           onCancel={confirmDialog.onCancel}
         />
       )}
-    </div>
-  );
-}
-
-function StatsPanel({ comparison }) {
-  const { t } = useTranslation();
-  const explanation = comparison.explanation;
-  const explanationError = comparison.explanationError;
-  return (
-    <div className="bg-white rounded-2xl shadow-xl p-6 mb-6">
-      <h3 className="text-lg font-semibold text-gray-800 mb-4">{t("statistics")}</h3>
-
-      {explanation && (
-        <div className="mb-5 border rounded-xl overflow-hidden">
-          <div className="bg-indigo-50 px-4 py-3 border-b">
-            <div className="font-medium text-indigo-900">{t("explanation")}</div>
-          </div>
-          <div className="p-4 text-sm text-gray-800 whitespace-pre-wrap">{explanation}</div>
-        </div>
-      )}
-
-      {!explanation && explanationError && (
-        <div className="mb-5 border rounded-xl overflow-hidden">
-          <div className="bg-red-50 px-4 py-3 border-b">
-            <div className="font-medium text-red-900">{t("explanation")}</div>
-          </div>
-          <div className="p-4 text-sm text-red-800 whitespace-pre-wrap">{explanationError}</div>
-        </div>
-      )}
-
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <StatCard label={t("changedLines")} value={comparison.textDiff?.stats?.changedLines || 0} color="purple" />
-        <StatCard label={t("modifications")} value={comparison.textDiff?.stats?.modifications || 0} color="yellow" />
-        <StatCard label={`${t("attachmentChanges")} (+)`} value={comparison.summary?.attachmentsAdded || 0} color="green" />
-        <StatCard label={`${t("attachmentChanges")} (-)`} value={comparison.summary?.attachmentsRemoved || 0} color="red" />
-      </div>
-      <p className="text-center mt-4 text-gray-500">{t("showDelta")} 👆</p>
-    </div>
-  );
-}
-
-function StatCard({ label, value, color }) {
-  const colorClasses = {
-    green: "bg-green-100 text-green-800",
-    red: "bg-red-100 text-red-800",
-    blue: "bg-blue-100 text-blue-800",
-    orange: "bg-orange-100 text-orange-800",
-    purple: "bg-purple-100 text-purple-800",
-    yellow: "bg-yellow-100 text-yellow-800",
-  };
-
-  return (
-    <div className={`rounded-xl p-4 ${colorClasses[color]}`}>
-      <div className="text-3xl font-bold">{value}</div>
-      <div className="text-sm opacity-75">{label}</div>
     </div>
   );
 }
