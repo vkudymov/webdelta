@@ -207,7 +207,18 @@ function FilterCountToggle({ filterKey, active, label, variant, title, onToggle 
   );
 }
 
+function fileRowHasDiffDetails(file) {
+  return Boolean(
+    file.semantic ||
+      (file.textDiff?.changes?.length ?? 0) > 0 ||
+      file.readError ||
+      file.semanticError
+  );
+}
+
 function FileRow({ file, t, columnLeftLabel, columnRightLabel }) {
+  const [expanded, setExpanded] = useState(false);
+  const hasDetails = fileRowHasDiffDetails(file);
   const styles = {
     added: "bg-green-50 border-green-200",
     removed: "bg-red-50 border-red-200",
@@ -230,35 +241,83 @@ function FileRow({ file, t, columnLeftLabel, columnRightLabel }) {
     file.status === "modified"
       ? `${formatSize(file.oldSize)} → ${formatSize(file.newSize)}`
       : formatSize(file.size);
+  const diffHint =
+    file.textDiff?.changes?.length > 0
+      ? `${file.textDiff.changes.length} ${t("lines")}`
+      : file.semantic?.pairs?.length > 0
+        ? String(file.semantic.pairs.length)
+        : null;
+
+  const toggleExpanded = () => {
+    if (hasDetails) setExpanded((prev) => !prev);
+  };
 
   return (
     <div className={`border rounded-xl overflow-hidden ${styles[file.status]}`}>
-      <div className="px-4 py-3 flex flex-wrap items-center gap-2 justify-between">
+      <div
+        className={`px-4 py-3 flex flex-wrap items-center gap-2 justify-between ${hasDetails ? "cursor-pointer select-none hover:bg-white/40" : ""}`}
+        role={hasDetails ? "button" : undefined}
+        tabIndex={hasDetails ? 0 : undefined}
+        aria-expanded={hasDetails ? expanded : undefined}
+        onClick={toggleExpanded}
+        onKeyDown={(event) => {
+          if (!hasDetails) return;
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            setExpanded((prev) => !prev);
+          }
+        }}
+      >
         <div className="flex items-center gap-2 min-w-0">
+          {hasDetails && (
+            <ChevronIcon expanded={expanded} className="w-4 h-4 shrink-0 text-gray-500" />
+          )}
           <span className={`px-2 py-0.5 rounded text-xs font-medium ${badges[file.status]}`}>{labels[file.status]}</span>
           <span className="font-medium text-gray-800 break-all">{file.filename}</span>
+          {hasDetails && !expanded && (file.readError || file.semanticError) && (
+            <span className="text-xs text-red-600 font-medium">{t("viewError")}</span>
+          )}
         </div>
-        <div className="text-sm text-gray-500 flex gap-3">
+        <div className="text-sm text-gray-500 flex flex-wrap items-center gap-3">
           <span>
             {t("fileType")}: {file.fileType || "—"}
           </span>
           <span>{sizeLabel}</span>
+          {hasDetails && (
+            <span className="text-xs text-gray-600" title={expanded ? t("fileDiffHide") : t("fileDiffShow")}>
+              {expanded ? t("fileDiffHide") : t("fileDiffShow")}
+              {diffHint ? ` (${diffHint})` : ""}
+            </span>
+          )}
         </div>
       </div>
-      {file.readError && <div className="px-4 pb-3 text-sm text-red-700">{file.readError}</div>}
-      {file.semanticError && <div className="px-4 pb-3 text-sm text-red-700">{file.semanticError}</div>}
-      {file.semantic ? (
-        <SemanticPairs semantic={file.semantic} t={t} columnLeftLabel={columnLeftLabel} columnRightLabel={columnRightLabel} />
-      ) : file.textDiff?.changes?.length > 0 && (
-        <div className="p-4 bg-white border-t">
-          <h4 className="text-sm font-medium text-gray-600 mb-2">{t("attachmentTextChanges")}</h4>
-          <LineDeltaTable
-            changes={file.textDiff.changes}
-            t={t}
-            columnLeftLabel={columnLeftLabel}
-            columnRightLabel={columnRightLabel}
-          />
-        </div>
+      {expanded && hasDetails && (
+        <>
+          {file.readError && <div className="px-4 pb-3 text-sm text-red-700 border-t bg-white">{file.readError}</div>}
+          {file.semanticError && (
+            <div className="px-4 pb-3 text-sm text-red-700 border-t bg-white">{file.semanticError}</div>
+          )}
+          {file.semantic ? (
+            <SemanticPairs
+              semantic={file.semantic}
+              t={t}
+              columnLeftLabel={columnLeftLabel}
+              columnRightLabel={columnRightLabel}
+            />
+          ) : (
+            file.textDiff?.changes?.length > 0 && (
+              <div className="p-4 bg-white border-t">
+                <h4 className="text-sm font-medium text-gray-600 mb-2">{t("attachmentTextChanges")}</h4>
+                <LineDeltaTable
+                  changes={file.textDiff.changes}
+                  t={t}
+                  columnLeftLabel={columnLeftLabel}
+                  columnRightLabel={columnRightLabel}
+                />
+              </div>
+            )
+          )}
+        </>
       )}
     </div>
   );
@@ -436,6 +495,20 @@ function TextIcon() {
         strokeWidth={2}
         d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
       />
+    </svg>
+  );
+}
+
+function ChevronIcon({ expanded, className }) {
+  return (
+    <svg
+      className={`${className} transition-transform ${expanded ? "rotate-90" : ""}`}
+      fill="none"
+      stroke="currentColor"
+      viewBox="0 0 24 24"
+      aria-hidden
+    >
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
     </svg>
   );
 }
