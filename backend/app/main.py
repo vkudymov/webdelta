@@ -9,6 +9,7 @@ from playwright.async_api import async_playwright
 from .config import settings
 from .agent import build_explainer
 from .repository import get_repo
+from .filediff_bridge import filediff_status
 from .routes_pages import router as pages_router
 
 
@@ -48,6 +49,11 @@ app.add_middleware(
 )
 
 app.include_router(pages_router)
+
+
+@app.get("/api/filediff")
+async def filediff_info():
+    return await filediff_status()
 
 
 @app.get("/health")

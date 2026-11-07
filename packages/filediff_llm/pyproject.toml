@@ -1,0 +1,14 @@
+[project]
+name = "filediff-llm"
+version = "0.1.0"
+description = "Align two document versions by content and compare meaning with an OpenAI-compatible model."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["openai>=1.40"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

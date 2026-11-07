@@ -10,6 +10,7 @@ import Notification from "../components/Notification";
 import SavedPages from "../components/SavedPages";
 import { LocaleProvider } from "../lib/locale";
 import { StorageProvider, useStorageSource } from "../lib/storage";
+import { CompareEngineProvider, useCompareEngine } from "../lib/compareEngine";
 import { useTranslation } from "../hooks/useTranslation";
 import { apiFetch } from "../lib/api";
 import { formatSnapshotLabel } from "../lib/snapshotLabel";
@@ -17,6 +18,7 @@ import { formatSnapshotLabel } from "../lib/snapshotLabel";
 function AppContent() {
   const { t, locale } = useTranslation();
   const { source } = useStorageSource();
+  const { engine, model } = useCompareEngine();
   const [url, setUrl] = useState("");
   const [checkName, setCheckName] = useState("");
   const [loading, setLoading] = useState(false);
@@ -129,6 +131,8 @@ function AppContent() {
           snapshotId: versionA.snapshotId,
           snapshotId2: versionB.snapshotId,
           checkName: (versionA.checkName || checkName).trim() || null,
+          compareEngine: engine,
+          compareModel: engine === "llm" ? model || null : null,
         }),
       });
 
@@ -290,7 +294,9 @@ export default function Page() {
   return (
     <LocaleProvider>
       <StorageProvider>
-        <AppContent />
+        <CompareEngineProvider>
+          <AppContent />
+        </CompareEngineProvider>
       </StorageProvider>
     </LocaleProvider>
   );

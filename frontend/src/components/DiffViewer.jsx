@@ -98,6 +98,12 @@ export default function DiffViewer({ comparison, versionLeftLabel, versionRightL
           <LineDeltaTable changes={textDiff.changes || []} t={t} columnLeftLabel={colLeft} columnRightLabel={colRight} />
         </section>
 
+        {comparison.filediffError && (
+          <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
+            {comparison.filediffError}
+          </div>
+        )}
+
         <section>
           <h3 className="text-lg font-medium text-gray-700 mb-3 flex items-center gap-2">
             <AttachmentIcon />
@@ -201,7 +207,18 @@ function FilterCountToggle({ filterKey, active, label, variant, title, onToggle 
   );
 }
 
+function fileRowHasDiffDetails(file) {
+  return Boolean(
+    file.semantic ||
+      (file.textDiff?.changes?.length ?? 0) > 0 ||
+      file.readError ||
+      file.semanticError
+  );
+}
+
 function FileRow({ file, t, columnLeftLabel, columnRightLabel }) {
+  const [expanded, setExpanded] = useState(false);
+  const hasDetails = fileRowHasDiffDetails(file);
   const styles = {
     added: "bg-green-50 border-green-200",
     removed: "bg-red-50 border-red-200",
@@ -224,31 +241,166 @@ function FileRow({ file, t, columnLeftLabel, columnRightLabel }) {
     file.status === "modified"
       ? `${formatSize(file.oldSize)} → ${formatSize(file.newSize)}`
       : formatSize(file.size);
+  const diffHint =
+    file.textDiff?.changes?.length > 0
+      ? `${file.textDiff.changes.length} ${t("lines")}`
+      : file.semantic?.pairs?.length > 0
+        ? String(file.semantic.pairs.length)
+        : null;
+
+  const toggleExpanded = () => {
+    if (hasDetails) setExpanded((prev) => !prev);
+  };
 
   return (
     <div className={`border rounded-xl overflow-hidden ${styles[file.status]}`}>
-      <div className="px-4 py-3 flex flex-wrap items-center gap-2 justify-between">
+      <div
+        className={`px-4 py-3 flex flex-wrap items-center gap-2 justify-between ${hasDetails ? "cursor-pointer select-none hover:bg-white/40" : ""}`}
+        role={hasDetails ? "button" : undefined}
+        tabIndex={hasDetails ? 0 : undefined}
+        aria-expanded={hasDetails ? expanded : undefined}
+        onClick={toggleExpanded}
+        onKeyDown={(event) => {
+          if (!hasDetails) return;
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            setExpanded((prev) => !prev);
+          }
+        }}
+      >
         <div className="flex items-center gap-2 min-w-0">
+          {hasDetails && (
+            <ChevronIcon expanded={expanded} className="w-4 h-4 shrink-0 text-gray-500" />
+          )}
           <span className={`px-2 py-0.5 rounded text-xs font-medium ${badges[file.status]}`}>{labels[file.status]}</span>
           <span className="font-medium text-gray-800 break-all">{file.filename}</span>
+          {hasDetails && !expanded && (file.readError || file.semanticError) && (
+            <span className="text-xs text-red-600 font-medium">{t("viewError")}</span>
+          )}
         </div>
-        <div className="text-sm text-gray-500 flex gap-3">
+        <div className="text-sm text-gray-500 flex flex-wrap items-center gap-3">
           <span>
             {t("fileType")}: {file.fileType || "—"}
           </span>
           <span>{sizeLabel}</span>
+          {hasDetails && (
+            <span className="text-xs text-gray-600" title={expanded ? t("fileDiffHide") : t("fileDiffShow")}>
+              {expanded ? t("fileDiffHide") : t("fileDiffShow")}
+              {diffHint ? ` (${diffHint})` : ""}
+            </span>
+          )}
         </div>
       </div>
-      {file.readError && <div className="px-4 pb-3 text-sm text-red-700">{file.readError}</div>}
-      {file.textDiff?.changes?.length > 0 && (
-        <div className="p-4 bg-white border-t">
-          <h4 className="text-sm font-medium text-gray-600 mb-2">{t("attachmentTextChanges")}</h4>
-          <LineDeltaTable
-            changes={file.textDiff.changes}
-            t={t}
-            columnLeftLabel={columnLeftLabel}
-            columnRightLabel={columnRightLabel}
-          />
+      {expanded && hasDetails && (
+        <>
+          {file.readError && <div className="px-4 pb-3 text-sm text-red-700 border-t bg-white">{file.readError}</div>}
+          {file.semanticError && (
+            <div className="px-4 pb-3 text-sm text-red-700 border-t bg-white">{file.semanticError}</div>
+          )}
+          {file.semantic ? (
+            <SemanticPairs
+              semantic={file.semantic}
+              t={t}
+              columnLeftLabel={columnLeftLabel}
+              columnRightLabel={columnRightLabel}
+            />
+          ) : (
+            file.textDiff?.changes?.length > 0 && (
+              <div className="p-4 bg-white border-t">
+                <h4 className="text-sm font-medium text-gray-600 mb-2">{t("attachmentTextChanges")}</h4>
+                <LineDeltaTable
+                  changes={file.textDiff.changes}
+                  t={t}
+                  columnLeftLabel={columnLeftLabel}
+                  columnRightLabel={columnRightLabel}
+                />
+              </div>
+            )
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function semanticStats(semantic) {
+  if (semantic?.stats) {
+    return semantic.stats;
+  }
+  const pairs = semantic?.pairs || [];
+  let changedCount = 0;
+  let leftOnlyCount = 0;
+  let rightOnlyCount = 0;
+  for (const pair of pairs) {
+    if (pair.relation === "changed") changedCount += 1;
+    else if (pair.relation === "left_only") leftOnlyCount += 1;
+    else if (pair.relation === "right_only") rightOnlyCount += 1;
+  }
+  const sameCount = Number(semantic?.sameCount) || 0;
+  const material = changedCount + leftOnlyCount + rightOnlyCount;
+  return { sameCount, changedCount, leftOnlyCount, rightOnlyCount, material };
+}
+
+function formatSemanticSummary(semantic, t) {
+  const stats = semanticStats(semantic);
+  const sameCount = stats.sameCount ?? 0;
+  const material =
+    stats.material ??
+    (stats.changedCount ?? 0) + (stats.leftOnlyCount ?? 0) + (stats.rightOnlyCount ?? 0);
+  if (material === 0) {
+    return t("semanticSummaryOnlySame").replace("{sameCount}", String(sameCount));
+  }
+  return t("semanticSummaryBreakdown")
+    .replace("{sameCount}", String(sameCount))
+    .replace("{changedCount}", String(stats.changedCount ?? 0))
+    .replace("{leftOnlyCount}", String(stats.leftOnlyCount ?? 0))
+    .replace("{rightOnlyCount}", String(stats.rightOnlyCount ?? 0));
+}
+
+function SemanticPairs({ semantic, t, columnLeftLabel, columnRightLabel }) {
+  const pairs = semantic.pairs || [];
+  const labels = {
+    same: t("semanticSame"),
+    changed: t("semanticChanged"),
+    left_only: t("semanticLeftOnly"),
+    right_only: t("semanticRightOnly"),
+  };
+  const styles = {
+    same: "bg-slate-50",
+    changed: "bg-yellow-50",
+    left_only: "bg-red-50",
+    right_only: "bg-green-50",
+  };
+  return (
+    <div className="p-4 bg-white border-t">
+      <h4 className="text-sm font-medium text-gray-600 mb-1">{t("semanticTitle")}</h4>
+      <p className="text-sm text-gray-700 mb-3">{formatSemanticSummary(semantic, t)}</p>
+      {(semantic.sameCount || 0) > 0 && (
+        <p className="text-xs text-gray-500 mb-3">{t("semanticSameCount").replace("{count}", String(semantic.sameCount))}</p>
+      )}
+      {pairs.length > 0 && (
+        <div className="border rounded-xl overflow-hidden">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="bg-gray-100 text-gray-600">
+                <th className="px-4 py-3 text-left font-medium w-36">{t("semanticRelation")}</th>
+                <th className="px-4 py-3 text-left font-medium">{columnLeftLabel}</th>
+                <th className="px-4 py-3 text-left font-medium">{columnRightLabel}</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-100">
+              {pairs.map((pair, index) => (
+                <tr key={index} className={styles[pair.relation] || "bg-white"}>
+                  <td className="px-4 py-3 align-top text-xs font-medium text-gray-700">
+                    <div>{labels[pair.relation] || pair.relation}</div>
+                    {pair.note && <div className="mt-1 font-normal text-gray-500">{pair.note}</div>}
+                  </td>
+                  <td className="px-4 py-3 align-top whitespace-pre-wrap break-all">{pair.left || "—"}</td>
+                  <td className="px-4 py-3 align-top whitespace-pre-wrap break-all">{pair.right || "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       )}
     </div>
@@ -343,6 +495,20 @@ function TextIcon() {
         strokeWidth={2}
         d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
       />
+    </svg>
+  );
+}
+
+function ChevronIcon({ expanded, className }) {
+  return (
+    <svg
+      className={`${className} transition-transform ${expanded ? "rotate-90" : ""}`}
+      fill="none"
+      stroke="currentColor"
+      viewBox="0 0 24 24"
+      aria-hidden
+    >
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
     </svg>
   );
 }

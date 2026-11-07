@@ -51,6 +51,7 @@ ensure_backend_deps() {
   source "$ROOT/.venv/bin/activate"
   python -m pip install -U pip
   pip install -r "$req"
+  pip install -e "$ROOT/packages/filediff_llm"
   echo "$current_hash" >"$stamp"
 }
 
