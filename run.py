@@ -112,6 +112,7 @@ def ensure_backend_deps() -> None:
     print("Устанавливаю Python-зависимости...")
     run_checked([str(VENV_PYTHON), "-m", "pip", "install", "-U", "pip"])
     run_checked([str(VENV_PYTHON), "-m", "pip", "install", "-r", str(req)])
+    run_checked([str(VENV_PYTHON), "-m", "pip", "install", "-e", str(ROOT / "packages" / "filediff_llm")])
     stamp.write_text(current)
 
 

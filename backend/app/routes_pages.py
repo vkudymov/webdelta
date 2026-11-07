@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 
 from .diffing import compare_texts, is_text_content_type
 from .document_text import extract_document_text
+from .filediff_bridge import apply_semantic_compare
 from .fetcher import fetch_page_rendered, sanitize_storage_filename
 from .results_store import (
     comparison_snapshot,
@@ -795,6 +796,7 @@ async def compare(body: CompareRequest, request: Request):
             )
             return JSONResponse(status_code=500, content={"error": "Failed to load saved snapshot"})
         comparison = _diff_snapshots(url, left, right, check_name)
+        semantic_left, semantic_right = left, right
     else:
         if source != "results" and not saved:
             await _mark_history(
@@ -830,6 +832,18 @@ async def compare(body: CompareRequest, request: Request):
             "attachments": current_attachments,
         }
         comparison = _diff_snapshots(url, snapshot, right, check_name)
+        semantic_left, semantic_right = snapshot, right
+
+    if body.compareEngine == "llm":
+        comparison = await apply_semantic_compare(
+            comparison,
+            url=url,
+            left=semantic_left,
+            right=semantic_right,
+            check_name=check_name,
+            model=body.compareModel,
+            locale=body.locale,
+        )
 
     # Agent explanation (optional, added later by agent module)
     explain = getattr(request.app.state, "explain_delta", None)

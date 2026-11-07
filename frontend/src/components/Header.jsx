@@ -3,11 +3,13 @@
 import { useContext } from "react";
 import { LocaleContext } from "../lib/locale";
 import { useStorageSource } from "../lib/storage";
+import { useCompareEngine } from "../lib/compareEngine";
 import { useTranslation } from "../hooks/useTranslation";
 
 export default function Header() {
   const { locale, setLocale } = useContext(LocaleContext);
   const { source, setSource, supabaseConfigured } = useStorageSource();
+  const { engine, setEngine, model, setModel, models, available } = useCompareEngine();
   const { t } = useTranslation();
 
   return (
@@ -25,7 +27,7 @@ export default function Header() {
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap justify-end">
           <button
             type="button"
             onClick={() => setSource("results")}
@@ -46,6 +48,40 @@ export default function Header() {
           >
             {t("sourceSupabase")}
           </button>
+          <button
+            type="button"
+            onClick={() => setEngine("hash")}
+            className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${
+              engine === "hash" ? "bg-white text-blue-700" : "bg-white/10 hover:bg-white/20"
+            }`}
+          >
+            {t("engineHash")}
+          </button>
+          <button
+            type="button"
+            onClick={() => setEngine("llm")}
+            disabled={!available}
+            title={!available ? t("engineUnavailable") : t("engineModel")}
+            className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${
+              engine === "llm" ? "bg-white text-blue-700" : "bg-white/10 hover:bg-white/20"
+            } disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-white/10`}
+          >
+            {t("engineModel")}
+          </button>
+          {engine === "llm" && models.length > 0 && (
+            <select
+              value={model}
+              onChange={(event) => setModel(event.target.value)}
+              aria-label={t("engineModel")}
+              className="max-w-[14rem] rounded-lg bg-white px-2 py-1.5 text-sm font-medium text-blue-800"
+            >
+              {models.map((item) => (
+                <option key={item} value={item}>
+                  {item}
+                </option>
+              ))}
+            </select>
+          )}
           <button
             onClick={() => setLocale("ru")}
             className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${

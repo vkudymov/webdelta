@@ -29,6 +29,8 @@ class CompareRequest(BaseModel):
     snapshotId2: int | str | None = None
     checkName: str | None = None
     source: Literal["results", "supabase"] | None = None
+    compareEngine: Literal["hash", "llm"] = "hash"
+    compareModel: str | None = None
 
 
 class DownloadResponse(BaseModel):
@@ -79,6 +81,8 @@ class AttachmentModified(BaseModel):
     newHash: str | None = None
     textDiff: TextDiff | None = None
     readError: str | None = None
+    semantic: dict[str, Any] | None = None
+    semanticError: str | None = None
 
 
 class AttachmentDiffs(BaseModel):
@@ -96,6 +100,7 @@ class ComparisonSummary(BaseModel):
     attachmentsRemoved: int = 0
     attachmentsModified: int = 0
     attachmentsUnchanged: int = 0
+    compareEngine: Literal["hash", "llm"] = "hash"
 
 
 class ComparisonPayload(BaseModel):
@@ -108,6 +113,7 @@ class ComparisonPayload(BaseModel):
     summary: ComparisonSummary
     explanation: str | None = None
     explanationError: str | None = None
+    filediffError: str | None = None
 
 
 class CompareResponse(BaseModel):

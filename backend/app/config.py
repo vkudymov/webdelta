@@ -31,6 +31,12 @@ class Settings(BaseSettings):
     openai_api_key: str | None = None
     openai_model: str = "gpt-4.1-mini"
 
+    # File meaning compare (optional package filediff-llm). Separate from the page explainer.
+    filediff_base_url: str = "http://127.0.0.1:1234/v1"
+    filediff_model: str = ""
+    filediff_api_key: str = "lm-studio"
+    filediff_usage_path: str = str(ROOT_DIR / "results" / "filediff-usage.jsonl")
+
     # Post analyzer (delta explainer): provider switch
     analyzer_provider: str = "openai"  # "openai" | "lmstudio"
     # Only from env (no hardcode): required when analyzer_provider=lmstudio
@@ -57,4 +63,5 @@ def _resolve_under_root(p: str) -> str:
 
 # Allow relative paths in .env (resolve relative to repo root, not process CWD)
 settings.results_dir = _resolve_under_root(settings.results_dir)
+settings.filediff_usage_path = _resolve_under_root(settings.filediff_usage_path)
 
