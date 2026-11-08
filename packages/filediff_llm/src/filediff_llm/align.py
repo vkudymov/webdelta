@@ -101,9 +101,7 @@ def _windows(blocks: list[dict]) -> list[tuple[list[dict], set[str]]]:
 
 
 def _clip(text: str) -> str:
-    if len(text) <= _BLOCK_CHARS:
-        return text
-    return text[: _BLOCK_CHARS - 1] + "…"
+    return text if len(text) <= _BLOCK_CHARS else f"{text[: _BLOCK_CHARS - 1]}…"
 
 
 def _prompt(filename: str, left_blocks: list[dict], right_blocks: list[dict], locale: str) -> str:
@@ -264,14 +262,12 @@ async def align_and_compare(
                     resolved[f"R:{block['id']}"] = _pair(None, block, "right_only")
 
     pairs = list(resolved.values())
-    same_meaning = sum(1 for pair in pairs if pair["relation"] == "same")
+    same_meaning = sum(pair["relation"] == "same" for pair in pairs)
     material = [pair for pair in pairs if pair["relation"] != "same"]
     same_total = exact_count + same_meaning
-    changed = sum(1 for pair in material if pair["relation"] == "changed")
-    left_only = sum(1 for pair in material if pair["relation"] == "left_only")
-    right_only = sum(1 for pair in material if pair["relation"] == "right_only")
+    changed, left_only, right_only = _count_material_relations(material)
     return {
-        "summary": _summary(same_total, material, locale),
+        "summary": _summary(same_total, material, locale, changed, left_only, right_only),
         "sameCount": same_total,
         "stats": {
             "sameCount": same_total,
@@ -284,10 +280,22 @@ async def align_and_compare(
     }
 
 
-def _summary(same_count: int, material: list[dict], locale: str) -> str:
-    changed = sum(1 for pair in material if pair["relation"] == "changed")
-    left_only = sum(1 for pair in material if pair["relation"] == "left_only")
-    right_only = sum(1 for pair in material if pair["relation"] == "right_only")
+def _count_material_relations(material: list[dict]) -> tuple[int, int, int]:
+    return (
+        sum(pair["relation"] == "changed" for pair in material),
+        sum(pair["relation"] == "left_only" for pair in material),
+        sum(pair["relation"] == "right_only" for pair in material),
+    )
+
+
+def _summary(
+    same_count: int,
+    material: list[dict],
+    locale: str,
+    changed: int,
+    left_only: int,
+    right_only: int,
+) -> str:
     if locale == "ru":
         if not material:
             return f"Смысл фрагментов совпадает ({same_count})."
