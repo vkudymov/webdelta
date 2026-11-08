@@ -41,7 +41,7 @@ export default function Header() {
             type="button"
             onClick={() => setSource("supabase")}
             disabled={!supabaseConfigured}
-            title={!supabaseConfigured ? t("sourceUnavailable") : t("sourceSupabase")}
+            title={supabaseConfigured ? t("sourceSupabase") : t("sourceUnavailable")}
             className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${
               source === "supabase" ? "bg-white text-blue-700" : "bg-white/10 hover:bg-white/20"
             } disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-white/10`}
@@ -61,7 +61,7 @@ export default function Header() {
             type="button"
             onClick={() => setEngine("llm")}
             disabled={!available}
-            title={!available ? t("engineUnavailable") : t("engineModel")}
+            title={available ? t("engineModel") : t("engineUnavailable")}
             className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${
               engine === "llm" ? "bg-white text-blue-700" : "bg-white/10 hover:bg-white/20"
             } disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-white/10`}
