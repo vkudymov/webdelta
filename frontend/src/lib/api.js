@@ -1,6 +1,14 @@
 "use client";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
+// Unset: Mac/dev Next on :3000 talks to uvicorn on :8000.
+// "" or "same-origin": portable UI is served by FastAPI, so requests stay on that host.
+const rawApiBase = process.env.NEXT_PUBLIC_API_URL;
+const API_BASE =
+  rawApiBase == null
+    ? "http://127.0.0.1:8000"
+    : rawApiBase === "" || rawApiBase === "same-origin"
+      ? ""
+      : rawApiBase.replace(/\/$/, "");
 
 let currentSource = "results";
 

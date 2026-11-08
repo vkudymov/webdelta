@@ -39,6 +39,22 @@ A tool for tracking changes on web pages.
 
 Либо из VS Code / Cursor: запустите `run.py`.
 
+## Portable Windows
+
+Сборка для Windows — отдельная папка с `WebDelta.exe`. Python и Node на компьютере пользователя не нужны. Разработка на Mac (`./dev.sh`, `run`, `run.py`) не меняется: по-прежнему Next на порту 3000 и API на порту 8000.
+
+Собрать архив можно только на Windows (нужны Node.js и Python 3.12 — они нужны сборке, не пользователю):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File packaging/windows/build.ps1
+```
+
+Либо GitHub Actions: workflow `Windows portable` (вручную или по тегу `v*`). Артефакт: `dist/WebDelta-windows-x64.zip`.
+
+Распакуйте zip в пустую папку и запустите `WebDelta.exe`. В папке лежат `runtime/`, `frontend/out/`, `.playwright-browsers/` и `.env`. Интерфейс и API открываются вместе на `http://127.0.0.1:8765/` (порт из `.env`, если занят — следующий свободный). Закройте окно консоли, чтобы остановить приложение. Снимки пишутся в `results/` рядом с exe. Режим «Модель» по-прежнему требует отдельно запущенный LM Studio. В portable-шаблоне `PLAYWRIGHT_CHANNEL` пустой: используется Chromium из папки, а не Chrome Beta.
+
+The Windows package is a folder with `WebDelta.exe`. End users do not install Python or Node. Mac dev scripts stay as they are. Build the zip on Windows with `packaging/windows/build.ps1`, or via the `Windows portable` GitHub Actions workflow. Unzip into an empty folder and start `WebDelta.exe` (`http://127.0.0.1:8765/`). Close the console window to stop it.
+
 ## Переменные окружения / Environment
 
 Скопируйте пример и заполните нужные значения:

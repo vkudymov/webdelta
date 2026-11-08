@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from playwright.async_api import async_playwright
 
-from .config import settings
+from .config import ROOT_DIR, settings
 from .agent import build_explainer
 from .repository import get_repo
 from .filediff_bridge import filediff_status
@@ -72,4 +75,13 @@ async def storage_info(request: Request):
         "sources": sources,
         "resultsDir": "results",
     }
+
+
+def _ui_dir() -> Path:
+    return ROOT_DIR / "frontend" / "out"
+
+
+# Portable build only. Dev (`run` / `dev.sh`) leaves this unset and keeps Next on :3000.
+if os.environ.get("WEBDELTA_SERVE_UI") == "1" and _ui_dir().is_dir():
+    app.mount("/", StaticFiles(directory=str(_ui_dir()), html=True), name="ui")
 
