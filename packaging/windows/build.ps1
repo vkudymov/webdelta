@@ -71,7 +71,9 @@ if ($LASTEXITCODE -ne 0) { throw "get-pip.py failed ($LASTEXITCODE)" }
 if ($LASTEXITCODE -ne 0) { throw "pip upgrade failed ($LASTEXITCODE)" }
 & $RuntimePython -m pip install -r (Join-Path $RepoRoot "backend\requirements.txt")
 if ($LASTEXITCODE -ne 0) { throw "requirements install failed ($LASTEXITCODE)" }
-& $RuntimePython -m pip install (Join-Path $RepoRoot "packages\filediff_llm")
+& $RuntimePython -m pip install "setuptools>=68" wheel
+if ($LASTEXITCODE -ne 0) { throw "setuptools install failed ($LASTEXITCODE)" }
+& $RuntimePython -m pip install --no-build-isolation (Join-Path $RepoRoot "packages\filediff_llm")
 if ($LASTEXITCODE -ne 0) { throw "filediff_llm install failed ($LASTEXITCODE)" }
 
 $Browsers = Join-Path $Stage ".playwright-browsers"
