@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from collections import defaultdict
 from pathlib import Path
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
+from . import applog
 from .diffing import compare_texts, is_text_content_type
 from .document_text import extract_document_text
 from .filediff_bridge import apply_semantic_compare
@@ -161,6 +163,18 @@ async def _mark_history(
         )
     except Exception:
         return
+
+
+def _compare_log_error(url: str, check_name: str | None, error: str, *, started: float, exc: BaseException | None = None, **extra):
+    applog.error(
+        "compare",
+        url=url,
+        checkName=check_name,
+        error=error if exc is None else None,
+        exc=exc,
+        durationMs=int((time.perf_counter() - started) * 1000),
+        **extra,
+    )
 
 
 def _history_item(row: dict) -> dict:
@@ -656,16 +670,20 @@ async def check(url: str, request: Request):
 @router.post("/download", response_model=DownloadResponse)
 async def download(body: DownloadRequest, request: Request):
     url = body.url.strip()
+    started = time.perf_counter()
 
     if not url:
+        applog.error("page_download", error="URL is required")
         return JSONResponse(status_code=400, content={"error": "URL is required"})
     if not is_valid_url(url):
+        applog.error("page_download", url=url, error="Invalid URL format")
         return JSONResponse(status_code=400, content={"error": "Invalid URL format"})
 
     repo = _repo(request)
     source = _parse_source(request, body.source)
     blocked = _supabase_unavailable(source, repo)
     if blocked:
+        applog.error("page_download", url=url, error="Supabase is not configured", source=source)
         return blocked
     existing = await repo.get_page_by_url(url) if repo else None
     existing_id = existing["id"] if existing else None
@@ -678,6 +696,14 @@ async def download(body: DownloadRequest, request: Request):
         current_attachments = list(rendered.get("attachments") or [])
     except Exception as exc:
         await _mark_history(repo, url, "download", False, error=str(exc), page_id=existing_id, check_name=check_name)
+        applog.error(
+            "page_download",
+            url=url,
+            checkName=check_name,
+            source=source,
+            durationMs=int((time.perf_counter() - started) * 1000),
+            exc=exc,
+        )
         return JSONResponse(status_code=500, content={"error": str(exc)})
 
     snapshot = comparison_snapshot(
@@ -690,6 +716,14 @@ async def download(body: DownloadRequest, request: Request):
         await _mark_history(
             repo, url, "download", False, error="Failed to read saved snapshot", page_id=existing_id, check_name=check_name
         )
+        applog.error(
+            "page_download",
+            url=url,
+            checkName=check_name,
+            source=source,
+            durationMs=int((time.perf_counter() - started) * 1000),
+            error="Failed to read saved snapshot",
+        )
         return JSONResponse(status_code=500, content={"error": "Failed to read saved snapshot"})
 
     page_id, snapshot_id, attachment_count = await _persist_snapshot(
@@ -700,6 +734,17 @@ async def download(body: DownloadRequest, request: Request):
         snapshot_id = stored.get("localPath")
         attachment_count = len(stored.get("attachments") or current_attachments or [])
     await _mark_history(repo, url, "download", True, title=stored.get("title"), page_id=page_id, check_name=check_name)
+    applog.success(
+        "page_download",
+        url=url,
+        checkName=check_name,
+        source=source,
+        title=stored.get("title"),
+        pageId=page_id,
+        snapshotId=snapshot_id,
+        attachmentCount=attachment_count,
+        durationMs=int((time.perf_counter() - started) * 1000),
+    )
     return {
         "success": True,
         "message": "Page saved",
@@ -712,15 +757,19 @@ async def download(body: DownloadRequest, request: Request):
 @router.post("/compare", response_model=CompareResponse)
 async def compare(body: CompareRequest, request: Request):
     url = body.url.strip()
+    started = time.perf_counter()
     if not url:
+        applog.error("compare", error="URL is required")
         return JSONResponse(status_code=400, content={"error": "URL is required"})
     if not is_valid_url(url):
+        applog.error("compare", url=url, error="Invalid URL format")
         return JSONResponse(status_code=400, content={"error": "Invalid URL format"})
 
     repo = _repo(request)
     source = _parse_source(request, body.source)
     blocked = _supabase_unavailable(source, repo)
     if blocked:
+        applog.error("compare", url=url, error="Supabase is not configured", source=source)
         return blocked
     saved = await repo.get_page_by_url(url) if repo and source == "supabase" else None
     saved_id = saved["id"] if saved else None
@@ -734,9 +783,11 @@ async def compare(body: CompareRequest, request: Request):
             await _mark_history(
                 repo, url, "compare", False, error="No saved version found for this URL", check_name=check_name
             )
+            _compare_log_error(url, check_name, "No saved version found for this URL", started=started, source=source)
             return JSONResponse(status_code=404, content={"error": "No saved version found for this URL"})
     elif not saved and not two_saved:
         await _mark_history(repo, url, "compare", False, error="No saved version found for this URL", check_name=check_name)
+        _compare_log_error(url, check_name, "No saved version found for this URL", started=started, source=source)
         return JSONResponse(status_code=404, content={"error": "No saved version found for this URL"})
 
     async def _snap_for(snapshot_id, *, allow_legacy: bool):
@@ -777,23 +828,27 @@ async def compare(body: CompareRequest, request: Request):
             await _mark_history(
                 repo, url, "compare", False, error="Both snapshot versions are required", page_id=saved_id, check_name=check_name
             )
+            _compare_log_error(url, check_name, "Both snapshot versions are required", started=started)
             return JSONResponse(status_code=400, content={"error": "Both snapshot versions are required"})
         left, err = await _snap_for(body.snapshotId, allow_legacy=False)
         if err:
             await _mark_history(
                 repo, url, "compare", False, error="Snapshot not found", page_id=saved_id, check_name=check_name
             )
+            _compare_log_error(url, check_name, "Snapshot not found", started=started, snapshotId=body.snapshotId)
             return err
         right, err = await _snap_for(body.snapshotId2, allow_legacy=False)
         if err:
             await _mark_history(
                 repo, url, "compare", False, error="Snapshot not found", page_id=saved_id, check_name=check_name
             )
+            _compare_log_error(url, check_name, "Snapshot not found", started=started, snapshotId=body.snapshotId2)
             return err
         if left is None or right is None:
             await _mark_history(
                 repo, url, "compare", False, error="Failed to load saved snapshot", page_id=saved_id, check_name=check_name
             )
+            _compare_log_error(url, check_name, "Failed to load saved snapshot", started=started)
             return JSONResponse(status_code=500, content={"error": "Failed to load saved snapshot"})
         comparison = _diff_snapshots(url, left, right, check_name)
         semantic_left, semantic_right = left, right
@@ -802,17 +857,20 @@ async def compare(body: CompareRequest, request: Request):
             await _mark_history(
                 repo, url, "compare", False, error="No saved version found for this URL", check_name=check_name
             )
+            _compare_log_error(url, check_name, "No saved version found for this URL", started=started, source=source)
             return JSONResponse(status_code=404, content={"error": "No saved version found for this URL"})
         snapshot, err = await _snap_for(body.snapshotId, allow_legacy=body.snapshotId is None)
         if err:
             await _mark_history(
                 repo, url, "compare", False, error="Snapshot not found", page_id=saved_id, check_name=check_name
             )
+            _compare_log_error(url, check_name, "Snapshot not found", started=started, snapshotId=body.snapshotId)
             return err
         if snapshot is None:
             await _mark_history(
                 repo, url, "compare", False, error="Failed to load saved snapshot", page_id=saved_id, check_name=check_name
             )
+            _compare_log_error(url, check_name, "Failed to load saved snapshot", started=started)
             return JSONResponse(status_code=500, content={"error": "Failed to load saved snapshot"})
 
         browser = _browser(request)
@@ -821,6 +879,7 @@ async def compare(body: CompareRequest, request: Request):
             current_attachments = list(current.get("attachments") or [])
         except Exception as exc:
             await _mark_history(repo, url, "compare", False, error=str(exc), page_id=saved_id, check_name=check_name)
+            _compare_log_error(url, check_name, str(exc), started=started, exc=exc)
             return JSONResponse(status_code=500, content={"error": str(exc)})
 
         right = {
@@ -854,6 +913,14 @@ async def compare(body: CompareRequest, request: Request):
             comparison["explanation"] = None
             msg = str(exc).strip() or type(exc).__name__
             comparison["explanationError"] = msg[:500]
+            applog.error(
+                "compare",
+                url=url,
+                checkName=check_name,
+                stage="explanation",
+                durationMs=int((time.perf_counter() - started) * 1000),
+                exc=exc,
+            )
 
     await _mark_history(
         repo,
@@ -863,6 +930,14 @@ async def compare(body: CompareRequest, request: Request):
         title=comparison.get("currentTitle") or comparison.get("savedTitle"),
         page_id=saved_id,
         check_name=check_name,
+    )
+    applog.success(
+        "compare",
+        url=url,
+        checkName=check_name,
+        source=source,
+        compareEngine=body.compareEngine,
+        durationMs=int((time.perf_counter() - started) * 1000),
     )
     return {"success": True, "comparison": comparison}
 

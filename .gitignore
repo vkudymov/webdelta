@@ -47,3 +47,6 @@ Thumbs.db
 
 # Local page snapshots (never commit — содержит скачанные страницы и вложения)
 results/
+
+# App logs (JSONL by day: success.log / errors.log)
+log/

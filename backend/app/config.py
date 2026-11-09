@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     cors_origins: str = "http://localhost:3000"
 
     results_dir: str = str(ROOT_DIR / "results")
+    log_dir: str = str(ROOT_DIR / "log")
 
     # Supabase
     supabase_url: str | None = None
@@ -63,5 +64,6 @@ def _resolve_under_root(p: str) -> str:
 
 # Allow relative paths in .env (resolve relative to repo root, not process CWD)
 settings.results_dir = _resolve_under_root(settings.results_dir)
+settings.log_dir = _resolve_under_root(settings.log_dir)
 settings.filediff_usage_path = _resolve_under_root(settings.filediff_usage_path)
 

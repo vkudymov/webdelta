@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from playwright.async_api import async_playwright
 
+from . import applog
 from .config import ROOT_DIR, settings
 from .agent import build_explainer
 from .repository import get_repo
@@ -18,6 +19,7 @@ from .routes_pages import router as pages_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    applog.configure(settings.log_dir)
     repo = await get_repo()
     app.state.repo = repo
 
