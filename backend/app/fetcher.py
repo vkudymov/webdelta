@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
 import re
 import tempfile
 import time
@@ -330,12 +331,17 @@ async def _click_download_one(page: Page, loc, fallback_url: str, *, page_url: s
         if link_title:
             suffix = (link_ext or Path(suggested).suffix.lstrip(".") or "bin").lstrip(".")
             filename = f"{link_title}.{suffix}"
-        tmp = Path(tempfile.mkstemp()[1])
+        fd, tmp_name = tempfile.mkstemp()
+        os.close(fd)
+        tmp = Path(tmp_name)
         stage = "save_as"
         await download.save_as(str(tmp))
         stage = "read"
         body = tmp.read_bytes()
-        tmp.unlink(missing_ok=True)
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
         content_type = _guess_content_type(filename)
         duration_ms = int((time.perf_counter() - started) * 1000)
         if not _keep_downloaded_file(content_type, filename):
