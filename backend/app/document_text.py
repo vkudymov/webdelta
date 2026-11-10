@@ -27,19 +27,42 @@ def extract_document_text(data: bytes | None, filename: str) -> tuple[str | None
 
 
 def _docx_text(data: bytes) -> str:
+    """Emit paragraphs and table cells in document order, one non-empty cell per line."""
     from docx import Document
+    from docx.oxml.ns import qn
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
 
     doc = Document(io.BytesIO(data))
     lines: list[str] = []
-    for paragraph in doc.paragraphs:
-        text = (paragraph.text or "").strip()
+
+    def add_text(text: str) -> None:
+        text = (text or "").strip()
         if text:
             lines.append(text)
-    for table in doc.tables:
+
+    def unique_row_cells(row):
+        cells = []
+        for cell in row.cells:
+            if not cells or cell._tc is not cells[-1]._tc:
+                cells.append(cell)
+        return cells
+
+    def add_table(table) -> None:
         for row in table.rows:
-            cells = [(cell.text or "").strip() for cell in row.cells]
-            if any(cells):
-                lines.append(" | ".join(cells))
+            for cell in unique_row_cells(row):
+                nested = list(cell.tables)
+                if nested:
+                    for nested_table in nested:
+                        add_table(nested_table)
+                    continue
+                add_text(cell.text)
+
+    for child in doc.element.body.iterchildren():
+        if child.tag == qn("w:p"):
+            add_text(Paragraph(child, doc).text)
+        elif child.tag == qn("w:tbl"):
+            add_table(Table(child, doc))
     return "\n".join(lines)
 
 

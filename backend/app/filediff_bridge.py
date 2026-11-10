@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from .config import settings
 from .document_text import extract_document_text
+from .filediff_prompt import FILEDIFF_SYSTEM_PROMPT
 from .results_store import read_attachment_bytes
 
 _FILE_LIMIT = 12
@@ -93,11 +94,11 @@ async def apply_semantic_compare(
 
     kept: list[dict] = []
     for index, row in enumerate(modified):
+        filename = row.get("filename") or "unnamed"
         if index >= _FILE_LIMIT:
             row["semanticError"] = "file limit reached; hash diff kept"
             kept.append(row)
             continue
-        filename = row.get("filename") or "unnamed"
         left_att = _find(left_attachments, filename)
         right_att = _find(right_attachments, filename)
         if left_att is None or right_att is None:
@@ -120,6 +121,7 @@ async def apply_semantic_compare(
                 provider=provider,
                 usage=usage,
                 locale=locale or "ru",
+                system_prompt=FILEDIFF_SYSTEM_PROMPT,
             )
         except Exception as exc:
             row["semanticError"] = str(exc)[:300]
