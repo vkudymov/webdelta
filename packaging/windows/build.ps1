@@ -21,7 +21,7 @@ function Copy-Tree {
         [Parameter(Mandatory = $true)][string]$Destination
     )
     New-Item -ItemType Directory -Force -Path $Destination | Out-Null
-    & robocopy $Source $Destination /E /NFL /NDL /NJH /NJS /XD __pycache__ .venv .git node_modules .next out /XF *.pyc .env .env.local
+    & robocopy $Source $Destination /E /NFL /NDL /NJH /NJS /XD __pycache__ .venv .git node_modules .next out /XF *.pyc .env .env.local .env.*.local
     if ($LASTEXITCODE -ge 8) {
         throw "robocopy failed ($LASTEXITCODE): $Source -> $Destination"
     }
@@ -58,7 +58,7 @@ if (-not $Pth) {
     throw "python._pth не найден в $Runtime"
 }
 $PthLines = @(Get-Content $Pth.FullName | Where-Object { $_ -notmatch 'import site' })
-$PthLines += @("Lib\site-packages", "import site")
+$PthLines += @("Lib\site-packages", "..\backend", "import site")
 Set-Content -Path $Pth.FullName -Value $PthLines -Encoding ascii
 
 $GetPip = Join-Path $env:TEMP "get-pip.py"

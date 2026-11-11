@@ -16,6 +16,9 @@ import webbrowser
 from pathlib import Path
 
 DEFAULT_PORT = 8765
+_MIN_PORT = 1
+_MAX_PORT = 65535
+_PORT_SCAN = 20
 
 
 def app_root() -> Path:
@@ -48,20 +51,53 @@ def preferred_port(root: Path) -> int:
         if key.strip() != "PORT":
             continue
         try:
-            return int(value.strip())
+            port = int(value.strip())
         except ValueError:
             return DEFAULT_PORT
+        if _MIN_PORT <= port <= _MAX_PORT:
+            return port
+        return DEFAULT_PORT
     return DEFAULT_PORT
 
 
+def _valid_port(port: int) -> int:
+    if _MIN_PORT <= port <= _MAX_PORT:
+        return port
+    raise ValueError(f"port out of range: {port}")
+
+
 def port_busy(port: int) -> bool:
+    _valid_port(port)
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.settimeout(0.3)
         return sock.connect_ex(("127.0.0.1", port)) == 0
 
 
-def port_range(start: int):
-    return range(start, start + 20)
+def port_range(start: int) -> range:
+    start = max(_MIN_PORT, min(_MAX_PORT, start))
+    end = min(_MAX_PORT, start + _PORT_SCAN - 1)
+    return range(start, end + 1)
+
+
+def _runtime_python(root: Path) -> Path:
+    root = root.resolve()
+    python = (root / "runtime" / "python.exe").resolve()
+    if python.parent != (root / "runtime").resolve() or not python.is_file():
+        print(
+            f"Не найден {python}. Распакуйте архив целиком и запускайте WebDelta.exe из этой папки.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return python
+
+
+def _backend_dir(root: Path) -> Path:
+    root = root.resolve()
+    backend = (root / "backend").resolve()
+    if backend.parent != root or not backend.is_dir():
+        print(f"Не найден каталог {backend}.", file=sys.stderr)
+        sys.exit(1)
+    return backend
 
 
 _JOB_HANDLE = None
@@ -182,35 +218,23 @@ def write_portable_ui_token(root: Path, token: str) -> None:
 
 
 def start_server(root: Path, port: int, *, local_token: str) -> subprocess.Popen:
-    python = root / "runtime" / "python.exe"
-    backend = root / "backend"
-    if not python.is_file():
-        print(f"Не найден {python}. Распакуйте архив целиком и запускайте WebDelta.exe из этой папки.", file=sys.stderr)
-        sys.exit(1)
-    if not backend.is_dir():
-        print(f"Не найден каталог {backend}.", file=sys.stderr)
-        sys.exit(1)
+    port = _valid_port(port)
+    python = _runtime_python(root)
+    backend = _backend_dir(root)
 
     env = os.environ.copy()
-    env["PLAYWRIGHT_BROWSERS_PATH"] = str(root / ".playwright-browsers")
+    env["PLAYWRIGHT_BROWSERS_PATH"] = str(root.resolve() / ".playwright-browsers")
     env["PLAYWRIGHT_CHANNEL"] = ""
     env["WEBDELTA_SERVE_UI"] = "1"
     env["HOST"] = "127.0.0.1"
     env["PORT"] = str(port)
     env["WEBDELTA_LOCAL_TOKEN"] = local_token
 
-    return subprocess.Popen(
-        [
-            str(python),
-            "-m",
-            "uvicorn",
-            "app.main:app",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            str(port),
-        ],
-        cwd=str(backend),
+    # Paths and port validated above (fixed runtime layout, not user-controlled argv).
+    return subprocess.Popen(  # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
+        ["-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", str(port)],
+        executable=os.fspath(python),
+        cwd=os.fspath(backend),
         env=env,
     )
 
@@ -260,7 +284,8 @@ def main() -> None:
         stop_server(proc)
         proc = None
     if proc is None or port is None:
-        print(f"Не удалось запустить сервер на портах {start}–{start + 19}.", file=sys.stderr)
+        last = min(_MAX_PORT, start + _PORT_SCAN - 1)
+        print(f"Не удалось запустить сервер на портах {start}–{last}.", file=sys.stderr)
         sys.exit(1)
     print(f"Корень: {root}")
     print(f"Запуск: http://127.0.0.1:{port}/")
