@@ -6,6 +6,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from playwright.async_api import async_playwright
 
@@ -43,6 +44,20 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="WebDelta API", version="2.0.0", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def require_local_api_token(request: Request, call_next):
+    expected = settings.webdelta_local_token
+    if not expected:
+        return await call_next(request)
+    path = request.url.path
+    if path == "/health" or not path.startswith("/api"):
+        return await call_next(request)
+    if request.headers.get("x-webdelta-token") != expected:
+        return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+    return await call_next(request)
+
 
 origins = [o.strip() for o in settings.cors_origins.split(",") if o.strip()]
 app.add_middleware(

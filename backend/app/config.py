@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     host: str = "127.0.0.1"
     port: int = 8000
     cors_origins: str = "http://localhost:3000"
+    # Portable Windows launcher sets this so only this session can call /api on loopback.
+    webdelta_local_token: str | None = None
 
     results_dir: str = str(ROOT_DIR / "results")
     log_dir: str = str(ROOT_DIR / "log")
