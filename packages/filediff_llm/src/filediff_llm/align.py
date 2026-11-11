@@ -163,6 +163,7 @@ async def _ask_window(
     right_blocks: list[dict],
     locale: str,
     usage: UsageStore | None,
+    system_prompt: str,
 ) -> list[dict]:
     started = time.perf_counter()
     error = None
@@ -170,7 +171,7 @@ async def _ask_window(
     parsed: list[dict] = []
     try:
         raw, stats = await provider.complete_json(
-            _SYSTEM,
+            system_prompt,
             _prompt(filename, left_blocks, right_blocks, locale),
         )
         parsed = _parse_pairs(raw)
@@ -204,6 +205,7 @@ async def align_and_compare(
     provider: OpenAICompatibleProvider,
     usage: UsageStore | None = None,
     locale: str = "ru",
+    system_prompt: str | None = None,
 ) -> dict:
     """Return pairs aligned by content. Identical paragraphs are not sent to the model."""
     left_blocks = split_blocks(left_text, "L")
@@ -211,6 +213,7 @@ async def align_and_compare(
     by_left = {block["id"]: block for block in left_blocks}
     by_right = {block["id"]: block for block in right_blocks}
     exact_count, jobs = _exact_jobs(left_blocks, right_blocks)
+    system_prompt = system_prompt or _SYSTEM
 
     resolved: dict[str, dict] = {}
     for left_part, right_part in jobs:
@@ -233,7 +236,7 @@ async def align_and_compare(
                 left_core = set()
             if index >= len(right_windows):
                 right_core = set()
-            raw_pairs = await _ask_window(provider, filename, left_window, right_window, locale, usage)
+            raw_pairs = await _ask_window(provider, filename, left_window, right_window, locale, usage, system_prompt)
             accepted = []
             for item in raw_pairs:
                 pair = _accepted(item, {block["id"] for block in left_window}, {block["id"] for block in right_window})

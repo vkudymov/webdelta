@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+import secrets
 import shutil
 import socket
 import subprocess
@@ -58,12 +60,8 @@ def port_busy(port: int) -> bool:
         return sock.connect_ex(("127.0.0.1", port)) == 0
 
 
-def first_free_port(start: int) -> int:
-    for port in range(start, start + 20):
-        if not port_busy(port):
-            return port
-    print(f"Нет свободного порта в диапазоне {start}–{start + 19}.", file=sys.stderr)
-    sys.exit(1)
+def port_range(start: int):
+    return range(start, start + 20)
 
 
 _JOB_HANDLE = None
@@ -163,7 +161,27 @@ def _tie_child_lifetime(pid: int) -> None:
     _JOB_HANDLE = job
 
 
-def start_server(root: Path, port: int) -> subprocess.Popen:
+def write_portable_ui_token(root: Path, token: str) -> None:
+    ui = root / "frontend" / "out"
+    if not ui.is_dir():
+        return
+    script = ui / "_webdelta_local.js"
+    script.write_text(f"window.__WEBDELTA_LOCAL_TOKEN__={json.dumps(token)};", encoding="utf-8")
+    index = ui / "index.html"
+    if not index.is_file():
+        return
+    tag = '<script src="/_webdelta_local.js"></script>'
+    html = index.read_text(encoding="utf-8")
+    if tag in html:
+        return
+    if "</head>" in html:
+        html = html.replace("</head>", f"  {tag}\n</head>", 1)
+    else:
+        html = f"{tag}\n{html}"
+    index.write_text(html, encoding="utf-8")
+
+
+def start_server(root: Path, port: int, *, local_token: str) -> subprocess.Popen:
     python = root / "runtime" / "python.exe"
     backend = root / "backend"
     if not python.is_file():
@@ -179,6 +197,7 @@ def start_server(root: Path, port: int) -> subprocess.Popen:
     env["WEBDELTA_SERVE_UI"] = "1"
     env["HOST"] = "127.0.0.1"
     env["PORT"] = str(port)
+    env["WEBDELTA_LOCAL_TOKEN"] = local_token
 
     return subprocess.Popen(
         [
@@ -196,21 +215,19 @@ def start_server(root: Path, port: int) -> subprocess.Popen:
     )
 
 
-def wait_healthy(proc: subprocess.Popen, port: int, timeout: float = 120) -> None:
+def wait_healthy(proc: subprocess.Popen, port: int, timeout: float = 120) -> bool:
     url = f"http://127.0.0.1:{port}/health"
     deadline = time.time() + timeout
     while time.time() < deadline:
         if proc.poll() is not None:
-            print("Сервер завершился до готовности. Смотрите сообщения выше.", file=sys.stderr)
-            sys.exit(proc.returncode or 1)
+            return False
         try:
             with urllib.request.urlopen(url, timeout=1) as response:
                 if response.status == 200:
-                    return
+                    return True
         except (urllib.error.URLError, TimeoutError, OSError):
             time.sleep(0.3)
-    print("Сервер не ответил на /health.", file=sys.stderr)
-    sys.exit(1)
+    return False
 
 
 def stop_server(proc: subprocess.Popen) -> None:
@@ -227,13 +244,27 @@ def stop_server(proc: subprocess.Popen) -> None:
 def main() -> None:
     root = app_root()
     ensure_env(root)
-    port = first_free_port(preferred_port(root))
+    local_token = secrets.token_urlsafe(32)
+    write_portable_ui_token(root, local_token)
+    start = preferred_port(root)
+    proc = None
+    port = None
+    for candidate in port_range(start):
+        if port_busy(candidate):
+            continue
+        proc = start_server(root, candidate, local_token=local_token)
+        _tie_child_lifetime(proc.pid)
+        if wait_healthy(proc, candidate):
+            port = candidate
+            break
+        stop_server(proc)
+        proc = None
+    if proc is None or port is None:
+        print(f"Не удалось запустить сервер на портах {start}–{start + 19}.", file=sys.stderr)
+        sys.exit(1)
     print(f"Корень: {root}")
     print(f"Запуск: http://127.0.0.1:{port}/")
-    proc = start_server(root, port)
-    _tie_child_lifetime(proc.pid)
     try:
-        wait_healthy(proc, port)
         webbrowser.open(f"http://127.0.0.1:{port}/")
         print("Закройте это окно, чтобы остановить WebDelta.")
         code = proc.wait()

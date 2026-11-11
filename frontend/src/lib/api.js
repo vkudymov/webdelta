@@ -12,6 +12,12 @@ const API_BASE =
 
 let currentSource = "results";
 
+function localApiHeaders() {
+  if (typeof window === "undefined") return {};
+  const token = window.__WEBDELTA_LOCAL_TOKEN__;
+  return token ? { "X-WebDelta-Token": token } : {};
+}
+
 export function setApiSource(source) {
   currentSource = source === "supabase" ? "supabase" : "results";
 }
@@ -38,7 +44,10 @@ export async function apiFetch(path, options = {}) {
       }
     }
   }
-  const res = await fetch(url, opts);
+  const res = await fetch(url, {
+    ...opts,
+    headers: { ...localApiHeaders(), ...(opts.headers || {}) },
+  });
   const data = await res.json().catch(() => ({}));
   return { res, data };
 }
