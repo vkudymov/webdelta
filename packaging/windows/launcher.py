@@ -230,10 +230,10 @@ def start_server(root: Path, port: int, *, local_token: str) -> subprocess.Popen
     env["PORT"] = str(port)
     env["WEBDELTA_LOCAL_TOKEN"] = local_token
 
-    # Paths and port validated above (fixed runtime layout, not user-controlled argv).
+    # args[0] must be python.exe: otherwise Windows drops -m and opens backend\uvicorn as a script.
+    python_exe = os.fspath(python)
     return subprocess.Popen(  # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
-        ["-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", str(port)],
-        executable=os.fspath(python),
+        [python_exe, "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", str(port)],
         cwd=os.fspath(backend),
         env=env,
     )
