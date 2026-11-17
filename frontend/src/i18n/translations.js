@@ -113,6 +113,7 @@ export const translations = {
     sourceFiles: "Файлы",
     sourceSupabase: "Supabase",
     sourceUnavailable: "Supabase не настроен",
+    help: "Справка",
   },
   en: {
     appTitle: "WebDelta",
@@ -227,6 +228,7 @@ export const translations = {
     sourceFiles: "Files",
     sourceSupabase: "Supabase",
     sourceUnavailable: "Supabase is not configured",
+    help: "Help",
   },
 };
 
