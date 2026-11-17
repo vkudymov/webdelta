@@ -29,6 +29,7 @@ from .results_store import (
     load_legacy_snapshot,
     load_snapshot,
     normalize_check_name,
+    peek_site,
     read_attachment_bytes,
     save_error,
     save_legacy_snapshot,
@@ -937,6 +938,8 @@ async def compare(body: CompareRequest, request: Request):
         checkName=check_name,
         source=source,
         compareEngine=body.compareEngine,
+        snapshotId=body.snapshotId,
+        snapshotId2=body.snapshotId2,
         durationMs=int((time.perf_counter() - started) * 1000),
     )
     return {"success": True, "comparison": comparison}
@@ -1018,7 +1021,9 @@ async def delete_page_snapshot(page_id: str, request: Request, snapshotId: str):
         return JSONResponse(status_code=400, content={"error": "snapshotId is required"})
 
     if source == "results":
+        meta = peek_site(page_id)
         if delete_site_snapshot(page_id, sid):
+            applog.purge_snapshot(url=(meta or {}).get("url"), snapshot_id=sid)
             return {"success": True, "message": "Snapshot deleted"}
         return JSONResponse(status_code=404, content={"error": "Snapshot not found"})
 
@@ -1057,6 +1062,7 @@ async def delete_page_snapshot(page_id: str, request: Request, snapshotId: str):
         delete_snapshot(url, local_path=local_path, check_name=check_name)
     if is_local_snapshot_path(sid):
         delete_site_snapshot(page_id, sid)
+    applog.purge_snapshot(url=url, snapshot_id=local_path or sid)
     return {"success": True, "message": "Snapshot deleted"}
 
 
@@ -1068,7 +1074,13 @@ async def delete(page_id: str, request: Request):
     if blocked:
         return blocked
     if source == "results":
+        meta = peek_site(page_id)
         if delete_site_dir(page_id):
+            applog.purge_site(
+                url=(meta or {}).get("url"),
+                page_id=page_id,
+                check_name=(meta or {}).get("checkName"),
+            )
             return {"success": True, "message": "Page deleted"}
         return JSONResponse(status_code=404, content={"error": "Page not found"})
 
@@ -1082,6 +1094,9 @@ async def delete(page_id: str, request: Request):
             delete_snapshot(page["url"], check_name=check_name)
             delete_legacy_snapshot(page["url"], check_name=check_name)
             await repo.delete_page(page["id"])
+            applog.purge_site(url=page["url"], page_id=str(page["id"]), check_name=check_name)
+        else:
+            applog.purge_site(url=hist.get("url"), page_id=str(page_id), check_name=hist.get("check_name") or hist.get("checkName"))
         await repo.delete_history(hist["id"])
         return {"success": True, "message": "Page deleted"}
 
@@ -1094,5 +1109,6 @@ async def delete(page_id: str, request: Request):
     ok = await repo.delete_page(page_id)
     if not ok:
         return JSONResponse(status_code=404, content={"error": "Page not found"})
+    applog.purge_site(url=page["url"], page_id=str(page_id), check_name=check_name)
     return {"success": True, "message": "Page deleted"}
 

@@ -467,6 +467,24 @@ def list_sites() -> list[dict[str, Any]]:
     return sites
 
 
+def peek_site(folder_name: str) -> dict[str, Any] | None:
+    """Read url/checkName from a site folder without deleting it."""
+    if not folder_name or folder_name in {".", ".."} or "/" in folder_name or "\\" in folder_name:
+        return None
+    base = Path(settings.results_dir) / folder_name
+    if not base.is_dir():
+        return None
+    latest = _latest_page_json(base)
+    latest_err = _latest_error_from_base(base)
+    url = (latest or {}).get("url") or (latest_err or {}).get("url")
+    if not url:
+        return None
+    return {
+        "url": url,
+        "checkName": normalize_check_name((latest or {}).get("checkName") or (latest_err or {}).get("checkName")),
+    }
+
+
 def delete_site_dir(folder_name: str) -> bool:
     root = Path(settings.results_dir).resolve()
     base = (Path(settings.results_dir) / folder_name).resolve()
