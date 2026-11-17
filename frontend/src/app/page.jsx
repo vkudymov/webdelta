@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Header from "../components/Header";
+import HelpDialog from "../components/HelpDialog";
 import UrlInput from "../components/UrlInput";
 import ActionButtons from "../components/ActionButtons";
 import DiffViewer from "../components/DiffViewer";
@@ -30,6 +31,7 @@ function AppContent() {
   const [pagesRefreshToken, setPagesRefreshToken] = useState(0);
   const [versionA, setVersionA] = useState(null);
   const [versionB, setVersionB] = useState(null);
+  const [helpOpen, setHelpOpen] = useState(false);
 
   const showNotification = (type, message) => {
     setNotification({ type, message });
@@ -230,7 +232,7 @@ function AppContent() {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 to-blue-50">
-      <Header />
+      <Header onOpenHelp={() => setHelpOpen(true)} />
 
       <main className="max-w-7xl mx-auto px-4 py-8 grid grid-cols-1 md:grid-cols-[320px_minmax(0,1fr)] gap-6 items-start">
         <SavedPages
@@ -286,6 +288,8 @@ function AppContent() {
           onCancel={confirmDialog.onCancel}
         />
       )}
+
+      {helpOpen ? <HelpDialog onClose={() => setHelpOpen(false)} /> : null}
     </div>
   );
 }
