@@ -44,6 +44,8 @@ create table if not exists public.snapshots (
   unique(page_id, captured_at)
 );
 
+alter table public.snapshots add column if not exists origin text;
+
 create index if not exists idx_snapshots_page_id on public.snapshots (page_id);
 create index if not exists idx_snapshots_page_id_captured_at on public.snapshots (page_id, captured_at desc);
 

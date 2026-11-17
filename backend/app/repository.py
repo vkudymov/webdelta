@@ -53,7 +53,15 @@ class Repo:
 
     async def delete_page(self, page_id: Any) -> bool: ...
 
-    async def insert_snapshot(self, page_id: Any, captured_at: str, content: str, title: str | None, local_path: str | None) -> Any: ...
+    async def insert_snapshot(
+        self,
+        page_id: Any,
+        captured_at: str,
+        content: str,
+        title: str | None,
+        local_path: str | None,
+        origin: str | None = None,
+    ) -> Any: ...
 
     async def get_snapshot(self, snapshot_id: Any) -> Optional[dict]: ...
 
@@ -253,7 +261,15 @@ class SupabaseRepo(Repo):
         data = getattr(res, "data", None)
         return bool(data)
 
-    async def insert_snapshot(self, page_id: Any, captured_at: str, content: str, title: str | None, local_path: str | None) -> Any:
+    async def insert_snapshot(
+        self,
+        page_id: Any,
+        captured_at: str,
+        content: str,
+        title: str | None,
+        local_path: str | None,
+        origin: str | None = None,
+    ) -> Any:
         payload = {
             "page_id": page_id,
             "captured_at": captured_at,
@@ -261,7 +277,16 @@ class SupabaseRepo(Repo):
             "title": title,
             "local_path": local_path,
         }
-        res = self.client.table("snapshots").insert(payload).execute()
+        if origin is not None:
+            payload["origin"] = origin
+        try:
+            res = self.client.table("snapshots").insert(payload).execute()
+        except APIError as exc:
+            missing = self._missing_column_key(exc, payload)
+            if not missing:
+                raise
+            payload.pop(missing, None)
+            res = self.client.table("snapshots").insert(payload).execute()
         data = getattr(res, "data", None) or []
         if not data:
             raise StorageError("Failed to insert snapshot")

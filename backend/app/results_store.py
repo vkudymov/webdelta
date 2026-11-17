@@ -50,6 +50,7 @@ def save_legacy_snapshot(url: str, snapshot: dict[str, Any], check_name: str | N
         "title": snapshot.get("title"),
         "content": snapshot.get("content") or "",
         "fetchedAt": snapshot.get("fetchedAt") or datetime.now(timezone.utc).isoformat(),
+        "origin": snapshot_origin(snapshot.get("origin")),
         "attachments": [],
     }
     for att in snapshot.get("attachments") or []:
@@ -201,6 +202,12 @@ def read_attachment_bytes(
         return None
 
 
+def snapshot_origin(value: Any = None) -> str:
+    if str(value or "").strip().lower() == "upload":
+        return "upload"
+    return "download"
+
+
 def comparison_snapshot(
     url: str,
     title: str | None,
@@ -208,6 +215,7 @@ def comparison_snapshot(
     attachments: list[dict],
     fetched_at: str | None = None,
     check_name: str | None = None,
+    origin: str | None = None,
 ) -> dict[str, Any]:
     stored_attachments: list[dict[str, Any]] = []
     for att in attachments:
@@ -229,6 +237,7 @@ def comparison_snapshot(
         "title": title,
         "content": content or "",
         "fetchedAt": fetched_at or datetime.now(timezone.utc).isoformat(),
+        "origin": snapshot_origin(origin),
         "attachments": stored_attachments,
     }
 
@@ -248,6 +257,7 @@ def save_snapshot(
     name = normalize_check_name(check_name) or normalize_check_name(snapshot.get("checkName"))
     snapshot["checkName"] = name
     snapshot["url"] = snapshot.get("url") or url
+    snapshot["origin"] = snapshot_origin(snapshot.get("origin"))
     fetched_at_raw = snapshot.get("fetchedAt")
     captured_at: datetime
     if isinstance(fetched_at_raw, str):
@@ -311,6 +321,7 @@ def save_snapshot(
             "content": snapshot.get("content") or "",
             "fetchedAt": snapshot.get("fetchedAt") or datetime.now(timezone.utc).isoformat(),
             "localPath": local_path,
+            "origin": snapshot_origin(snapshot.get("origin")),
             "attachments": stored_attachments,
         }
 
@@ -373,6 +384,7 @@ def _list_snapshots_from_base(base: Path) -> list[dict[str, Any]]:
                     "capturedAt": fetched,
                     "title": data.get("title"),
                     "attachmentCount": count_files_under_snapshot_dir(time_dir),
+                    "origin": snapshot_origin(data.get("origin")),
                 }
             )
     return items
@@ -436,7 +448,7 @@ def list_sites() -> list[dict[str, Any]]:
             continue
         snapshots = _list_snapshots_from_base(entry)
         last_ok = True
-        last_action = "download"
+        last_action = snapshot_origin((latest or {}).get("origin"))
         last_error = None
         if latest_err:
             err_key = str(latest_err.get("failedAt") or latest_err.get("localPath") or "")
