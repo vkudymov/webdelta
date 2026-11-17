@@ -239,6 +239,8 @@ function AppContent() {
           onSelectPage={handleSelectPage}
           onSelectVersion={handleSelectVersion}
           onVersionDeleted={handleVersionDeleted}
+          onUploaded={() => setPagesRefreshToken((x) => x + 1)}
+          onNotify={showNotification}
           refreshToken={pagesRefreshToken}
           currentUrl={url}
           selectedSiteUrl={versionA?.url || versionB?.url}

@@ -17,6 +17,7 @@ export const helpContent = {
               "Открыть страницу в браузере (как видит пользователь) и сохранить её текст.",
               "Скачать связанные документы: PDF, Word, Excel, PowerPoint, ODF, CSV, RTF, TXT и архивы. Картинки и счётчики не качаются.",
               "Хранить несколько версий одной проверки по дате и времени.",
+              "Добавить версию из локальных файлов с компьютера (без повторного скачивания сайта).",
               "Сверить любые две сохранённые версии: текст страницы и каждый файл.",
               "Сверять файлы по хешу (байты и строки) или по смыслу через локальную модель.",
               "Работать с локальной папкой «Файлы» и, если настроено, с облачной базой Supabase.",
@@ -33,7 +34,7 @@ export const helpContent = {
           {
             type: "ul",
             items: [
-              "Слева — список сайтов и их версий.",
+              "Слева — список сайтов и их версий. На карточке сайта — иконка загрузки локальных файлов (рядом с удалением).",
               "Справа сверху — название проверки, URL и кнопки «Скачать страницу» и «Показать дельту».",
               "В шапке — источник данных (Файлы / Supabase), способ сверки (Хеш / Модель), язык и эта справка.",
             ],
@@ -72,8 +73,8 @@ export const helpContent = {
             type: "steps",
             items: [
               "Выберите сайт слева (подставятся URL и название) или введите тот же URL.",
-              "Нажмите «Скачать страницу» ещё раз.",
-              "Появится новая строка версии с текущими датой и временем.",
+              "Нажмите «Скачать страницу» ещё раз — или на карточке сайта нажмите иконку загрузки и выберите файлы с компьютера.",
+              "Появится новая строка версии с текущими датой и временем. Если файлы загружены с компьютера, у версии будет метка «Локально».",
             ],
           },
           {
@@ -271,6 +272,7 @@ export const helpContent = {
               "Open a page in a real browser (as a user would see it) and save its text.",
               "Download linked documents: PDF, Word, Excel, PowerPoint, ODF, CSV, RTF, TXT, and archives. Images and tracking pixels are not downloaded.",
               "Keep several versions of the same check, grouped by date and time.",
+              "Add a version from files on this computer (without downloading the page again).",
               "Compare any two saved versions: page text and each file.",
               "Compare files by hash (bytes and line numbers) or by meaning with a local model.",
               "Work from the local Files folder and, if configured, from a Supabase database.",
@@ -287,7 +289,7 @@ export const helpContent = {
           {
             type: "ul",
             items: [
-              "Left: list of sites and their versions.",
+              "Left: list of sites and their versions. Each site card has an upload icon (next to delete) to add local files.",
               "Top right: check name, URL, and the Download page / Show Delta buttons.",
               "Header: data source (Files / Supabase), compare mode (Hash / Model), language, and this help.",
             ],
@@ -326,8 +328,8 @@ export const helpContent = {
             type: "steps",
             items: [
               "Select the site on the left (URL and name are filled in) or enter the same URL.",
-              "Click Download page again.",
-              "A new version row appears with the current date and time.",
+              "Click Download page again — or click the upload icon on the site card and choose files from this computer.",
+              "A new version row appears with the current date and time. Versions uploaded from disk are marked Local.",
             ],
           },
           {

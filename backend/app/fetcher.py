@@ -215,6 +215,15 @@ def extract_attachment_links(html: str, base_url: str) -> list[str]:
     return links
 
 
+def is_allowed_document_filename(filename: str) -> bool:
+    name = (filename or "").lower()
+    return any(name.endswith(ext) for ext in DOCUMENT_ATTACHMENT_EXTENSIONS)
+
+
+def guess_content_type(filename: str) -> str:
+    return _guess_content_type(filename)
+
+
 def _guess_content_type(filename: str) -> str:
     lower = (filename or "").lower()
     mapping = (

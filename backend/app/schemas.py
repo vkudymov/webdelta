@@ -127,6 +127,7 @@ class SnapshotListItem(BaseModel):
     title: str | None = None
     attachmentCount: int = 0
     localPath: str | None = None
+    origin: Literal["download", "upload"] = "download"
 
 
 class PageListItem(BaseModel):

@@ -1,19 +1,26 @@
 from __future__ import annotations
 
 import hashlib
-import json
+import re
 import time
+import unicodedata
 from collections import defaultdict
 from pathlib import Path
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, File, Form, Request, UploadFile
 from fastapi.responses import JSONResponse
 
 from . import applog
 from .diffing import compare_texts, is_text_content_type
 from .document_text import extract_document_text
 from .filediff_bridge import apply_semantic_compare
-from .fetcher import fetch_page_rendered, sanitize_storage_filename
+from .fetcher import (
+    DOCUMENT_ATTACHMENT_EXTENSIONS,
+    fetch_page_rendered,
+    guess_content_type,
+    is_allowed_document_filename,
+    sanitize_storage_filename,
+)
 from .results_store import (
     comparison_snapshot,
     count_snapshot_disk_files,
@@ -35,6 +42,7 @@ from .results_store import (
     save_legacy_snapshot,
     save_snapshot,
     site_dir,
+    snapshot_origin,
 )
 from .schemas import (
     CheckResponse,
@@ -47,8 +55,12 @@ from .schemas import (
 )
 from .utils import is_valid_url
 
-
 router = APIRouter(prefix="/api/pages", tags=["pages"])
+
+_MAX_UPLOAD_FILES = 1000
+_MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+_MAX_UPLOAD_TOTAL_BYTES = 1024 * 1024 * 1024
+_ACCEPT_EXTENSIONS = ", ".join(DOCUMENT_ATTACHMENT_EXTENSIONS)
 
 
 def _repo(request: Request):
@@ -97,7 +109,14 @@ async def _persist_snapshot(
 
         captured_at = snapshot.get("fetchedAt")
         local_path = snapshot.get("localPath")
-        snapshot_id = await repo.insert_snapshot(page_id, captured_at, content, title, local_path)
+        snapshot_id = await repo.insert_snapshot(
+            page_id,
+            captured_at,
+            content,
+            title,
+            local_path,
+            origin=snapshot_origin(snapshot.get("origin")),
+        )
 
         by_url = {a.get("url"): a for a in fetched_attachments if a.get("url")}
         attachments_to_insert: list[dict] = []
@@ -225,6 +244,7 @@ def _snapshot_item(row: dict) -> dict:
         "title": row.get("title"),
         "attachmentCount": int(row.get("attachment_count") or row.get("attachmentCount") or 0),
         "localPath": local_path,
+        "origin": snapshot_origin(row.get("origin")),
     }
 
 
@@ -250,6 +270,7 @@ def _merge_snapshots(db_rows: list[dict], file_items: list[dict]) -> list[dict]:
                 "title": item.get("title") or (db_item or {}).get("title"),
                 "attachmentCount": disk_count if disk_count > 0 else int((db_item or {}).get("attachmentCount") or 0),
                 "localPath": path or None,
+                "origin": snapshot_origin(item.get("origin") or (db_item or {}).get("origin")),
             }
         )
 
@@ -309,9 +330,48 @@ def _attachment_bytes(url: str, att: dict, local_path: str | None, check_name: s
     return read_attachment_bytes(url, rel, check_name=check_name)
 
 
+def _attachments_present_on_disk(
+    url: str, items: list[dict], local_path: str | None, check_name: str | None
+) -> list[dict]:
+    """Drop page.json rows whose bytes are not in this snapshot's files/ (ghost metadata)."""
+    if not items:
+        return items
+    if not local_path or not is_local_snapshot_path(str(local_path).strip()):
+        return items
+    lp = str(local_path).strip()
+    disk_keys, _names = _scan_files_subdir_keys(url, lp, check_name)
+    disk_hashes = {key[2:] for key in disk_keys if key.startswith("h:")}
+    kept: list[dict] = []
+    for att in items:
+        if att.get("bytes"):
+            kept.append(att)
+            continue
+        file_hash = str(att.get("hash") or "").strip()
+        if file_hash and file_hash in disk_hashes:
+            kept.append(att)
+            continue
+        if _attachment_bytes(url, att, lp, check_name) is not None:
+            kept.append(att)
+    return kept
+
+
 def _attachment_name(att: dict) -> str:
     raw = str(att.get("filename") or "unnamed").replace("\\", "/").split("/")[-1].strip()
     return raw or "unnamed"
+
+
+# save_snapshot may prefix disk names with 8-char hash (and optional _2_) for collisions
+_STORAGE_BASENAME_PREFIX = re.compile(r"^[0-9a-f]{8}(?:_\d+)?_", re.IGNORECASE)
+
+
+def _attachment_basename_for_match(name: str) -> str:
+    base = str(name or "").replace("\\", "/").split("/")[-1].strip() or "unnamed"
+    while True:
+        match = _STORAGE_BASENAME_PREFIX.match(base)
+        if not match:
+            break
+        base = base[match.end() :]
+    return unicodedata.normalize("NFC", base) or "unnamed"
 
 
 def _attachment_type(att: dict) -> str:
@@ -322,7 +382,7 @@ def _attachment_type(att: dict) -> str:
 
 
 def _attachment_match_key(att: dict) -> str:
-    name = _attachment_name(att)
+    name = _attachment_basename_for_match(_attachment_name(att))
     stem, dot, ext = name.rpartition(".")
     if not stem:
         return name.casefold()
@@ -369,7 +429,11 @@ def _scan_files_subdir_keys(
     for p in d.iterdir():
         if not p.is_file() or p.name == ".DS_Store":
             continue
-        key = _attachment_match_key({"filename": p.name})
+        try:
+            digest = hashlib.md5(p.read_bytes()).hexdigest()
+        except Exception:
+            digest = ""
+        key = f"h:{digest}" if digest else _attachment_match_key({"filename": p.name})
         keys.add(key)
         key_to_name.setdefault(key, p.name)
     return keys, key_to_name
@@ -459,17 +523,22 @@ def _merge_disk_filename_only_diff(
         else:
             new_unchanged.append(row)
 
+    def _known_basenames(rows: list[dict]) -> set[str]:
+        return {_attachment_basename_for_match(str(row.get("filename") or "")) for row in rows}
+
+    known_basenames = _known_basenames(added + removed + modified + new_modified + unchanged + new_unchanged)
+
     for k in only_on_right:
         if k not in added_keys:
             fn = right_names.get(k) or ""
-            if fn:
+            if fn and _attachment_basename_for_match(fn) not in known_basenames:
                 added.append(_synthetic_summary_from_disk_file(url, rp, check_name, fn))
                 added_keys.add(k)
 
     for k in only_on_left:
         if k not in removed_keys:
             fn = left_names.get(k) or ""
-            if fn:
+            if fn and _attachment_basename_for_match(fn) not in known_basenames:
                 removed.append(_synthetic_summary_from_disk_file(url, lp, check_name, fn))
                 removed_keys.add(k)
 
@@ -477,16 +546,42 @@ def _merge_disk_filename_only_diff(
 
 
 def _pair_attachments(left_items: list[dict], right_items: list[dict]) -> list[tuple[str, dict | None, dict | None]]:
+    """Pair by content hash first (same bytes, different filename/metadata), then by normalized name."""
+    pairs: list[tuple[str, dict | None, dict | None]] = []
+    right_by_hash: dict[str, list[dict]] = defaultdict(list)
+    for att in right_items:
+        file_hash = str(att.get("hash") or "").strip()
+        if file_hash:
+            right_by_hash[file_hash].append(att)
+
+    left_after_hash: list[dict] = []
+    for att in left_items:
+        file_hash = str(att.get("hash") or "").strip()
+        if file_hash and right_by_hash.get(file_hash):
+            pairs.append(("both", att, right_by_hash[file_hash].pop(0)))
+            if not right_by_hash[file_hash]:
+                del right_by_hash[file_hash]
+        else:
+            left_after_hash.append(att)
+
+    right_after_hash: list[dict] = []
+    paired_right_ids: set[int] = set()
+    for kind, _left, right in pairs:
+        if right is not None:
+            paired_right_ids.add(id(right))
+    for att in right_items:
+        if id(att) not in paired_right_ids:
+            right_after_hash.append(att)
+
     grouped_left: dict[str, list[dict]] = defaultdict(list)
     grouped_right: dict[str, list[dict]] = defaultdict(list)
-    for att in left_items:
+    for att in left_after_hash:
         grouped_left[_attachment_match_key(att)].append(att)
-    for att in right_items:
+    for att in right_after_hash:
         grouped_right[_attachment_match_key(att)].append(att)
 
-    pairs: list[tuple[str, dict | None, dict | None]] = []
     seen: set[str] = set()
-    for att in left_items + right_items:
+    for att in left_after_hash + right_after_hash:
         key = _attachment_match_key(att)
         if key in seen:
             continue
@@ -496,10 +591,10 @@ def _pair_attachments(left_items: list[dict], right_items: list[dict]) -> list[t
         shared = min(len(left_group), len(right_group))
         for index in range(shared):
             pairs.append(("both", left_group[index], right_group[index]))
-        for att in left_group[shared:]:
-            pairs.append(("removed", att, None))
-        for att in right_group[shared:]:
-            pairs.append(("added", None, att))
+        for extra in left_group[shared:]:
+            pairs.append(("removed", extra, None))
+        for extra in right_group[shared:]:
+            pairs.append(("added", None, extra))
     return pairs
 
 
@@ -529,6 +624,12 @@ def _diff_snapshots(url: str, left: dict, right: dict, check_name: str | None) -
     left_path = left.get("localPath") or left.get("local_path")
     right_path = right.get("localPath") or right.get("local_path")
     name = check_name or left.get("checkName") or right.get("checkName")
+    saved_attachments = _attachments_present_on_disk(
+        url, saved_attachments, left_path if isinstance(left_path, str) else None, name
+    )
+    current_attachments = _attachments_present_on_disk(
+        url, current_attachments, right_path if isinstance(right_path, str) else None, name
+    )
 
     added: list[dict] = []
     removed: list[dict] = []
@@ -708,7 +809,12 @@ async def download(body: DownloadRequest, request: Request):
         return JSONResponse(status_code=500, content={"error": str(exc)})
 
     snapshot = comparison_snapshot(
-        url, rendered.get("title"), rendered.get("content"), current_attachments, check_name=check_name
+        url,
+        rendered.get("title"),
+        rendered.get("content"),
+        current_attachments,
+        check_name=check_name,
+        origin="download",
     )
     save_snapshot(url, snapshot, downloaded_attachments=current_attachments, check_name=check_name)
     save_legacy_snapshot(url, snapshot, check_name=check_name)
@@ -749,6 +855,176 @@ async def download(body: DownloadRequest, request: Request):
     return {
         "success": True,
         "message": "Page saved",
+        "pageId": page_id,
+        "snapshotId": snapshot_id,
+        "attachmentCount": attachment_count,
+    }
+
+
+def _site_exists_on_disk(url: str, check_name: str | None) -> bool:
+    name = normalize_check_name(check_name)
+    bases = [site_dir(url, name)]
+    if name:
+        bases.append(site_dir(url))
+    return any(base.is_dir() for base in bases)
+
+
+async def _attachments_from_uploads(uploads: list[UploadFile]) -> tuple[list[dict] | None, JSONResponse | None]:
+    if not uploads:
+        return None, JSONResponse(status_code=400, content={"error": "No files selected"})
+    named = [item for item in uploads if item.filename]
+    if not named:
+        return None, JSONResponse(status_code=400, content={"error": "No files selected"})
+    if len(named) > _MAX_UPLOAD_FILES:
+        return None, JSONResponse(
+            status_code=400,
+            content={"error": f"Too many files (max {_MAX_UPLOAD_FILES})"},
+        )
+    attachments: list[dict] = []
+    used_urls: set[str] = set()
+    total_bytes = 0
+    for index, upload in enumerate(named):
+        filename = Path(upload.filename or "file").name
+        if not is_allowed_document_filename(filename):
+            return None, JSONResponse(
+                status_code=400,
+                content={"error": f"Unsupported file type: {filename}. Allowed: {_ACCEPT_EXTENSIONS}"},
+            )
+        body = await upload.read()
+        if len(body) > _MAX_UPLOAD_BYTES:
+            return None, JSONResponse(
+                status_code=400,
+                content={"error": f"File is too large: {filename} (max 50 MB)"},
+            )
+        total_bytes += len(body)
+        if total_bytes > _MAX_UPLOAD_TOTAL_BYTES:
+            return None, JSONResponse(
+                status_code=400,
+                content={"error": "Total upload is too large (max 1 GB)"},
+            )
+        content_type = guess_content_type(filename) or (upload.content_type or "application/octet-stream")
+        file_hash = hashlib.md5(body).hexdigest()
+        safe_name = sanitize_storage_filename(filename) or "file"
+        att_url = f"local://{file_hash}/{index}/{safe_name}"
+        if att_url in used_urls:
+            att_url = f"local://{file_hash}/{index}/{index}_{safe_name}"
+        used_urls.add(att_url)
+        text_content = None
+        if is_text_content_type(content_type):
+            try:
+                text_content = body.decode("utf-8")
+            except Exception:
+                text_content = body.decode("utf-8", errors="ignore")
+        attachments.append(
+            {
+                "url": att_url,
+                "filename": safe_name,
+                "content_type": content_type,
+                "size": len(body),
+                "hash": file_hash,
+                "bytes": body,
+                "text_content": text_content,
+            }
+        )
+    return attachments, None
+
+
+@router.post("/upload", response_model=DownloadResponse)
+async def upload_files(
+    request: Request,
+    url: str = Form(...),
+    checkName: str | None = Form(None),
+    source: str | None = Form(None),
+    files: list[UploadFile] = File(default=[]),
+):
+    url = (url or "").strip()
+    started = time.perf_counter()
+    if not url:
+        applog.error("page_upload", error="URL is required")
+        return JSONResponse(status_code=400, content={"error": "URL is required"})
+    if not is_valid_url(url):
+        applog.error("page_upload", url=url, error="Invalid URL format")
+        return JSONResponse(status_code=400, content={"error": "Invalid URL format"})
+
+    repo = _repo(request)
+    parsed_source = _parse_source(request, source)
+    blocked = _supabase_unavailable(parsed_source, repo)
+    if blocked:
+        applog.error("page_upload", url=url, error="Supabase is not configured", source=parsed_source)
+        return blocked
+
+    existing = await repo.get_page_by_url(url) if repo else None
+    check_name = _resolve_check_name(checkName, existing)
+    if not _site_exists_on_disk(url, check_name):
+        applog.error("page_upload", url=url, checkName=check_name, error="Site not found")
+        return JSONResponse(status_code=404, content={"error": "Site not found"})
+
+    attachments, error_response = await _attachments_from_uploads(files)
+    if error_response is not None:
+        applog.error("page_upload", url=url, checkName=check_name, source=parsed_source, error="invalid files")
+        return error_response
+
+    latest = load_snapshot(url, check_name=check_name)
+    title = (latest or {}).get("title")
+    content = (latest or {}).get("content") or ""
+    existing_id = existing["id"] if existing else None
+    await _mark_history(repo, url, "upload", False, page_id=existing_id, check_name=check_name)
+
+    snapshot = comparison_snapshot(
+        url, title, content, attachments, check_name=check_name, origin="upload"
+    )
+    try:
+        save_snapshot(url, snapshot, downloaded_attachments=attachments, check_name=check_name)
+        save_legacy_snapshot(url, snapshot, check_name=check_name)
+    except Exception as exc:
+        await _mark_history(repo, url, "upload", False, error=str(exc), page_id=existing_id, check_name=check_name)
+        applog.error(
+            "page_upload",
+            url=url,
+            checkName=check_name,
+            source=parsed_source,
+            durationMs=int((time.perf_counter() - started) * 1000),
+            exc=exc,
+        )
+        return JSONResponse(status_code=500, content={"error": str(exc)})
+
+    stored = load_snapshot(url, check_name=check_name)
+    if stored is None:
+        await _mark_history(
+            repo, url, "upload", False, error="Failed to read saved snapshot", page_id=existing_id, check_name=check_name
+        )
+        applog.error(
+            "page_upload",
+            url=url,
+            checkName=check_name,
+            source=parsed_source,
+            durationMs=int((time.perf_counter() - started) * 1000),
+            error="Failed to read saved snapshot",
+        )
+        return JSONResponse(status_code=500, content={"error": "Failed to read saved snapshot"})
+
+    page_id, snapshot_id, attachment_count = await _persist_snapshot(
+        repo, url, stored, attachments, existing, check_name=check_name
+    )
+    if page_id is None:
+        page_id = site_dir(url, check_name).name
+        snapshot_id = stored.get("localPath")
+        attachment_count = len(stored.get("attachments") or attachments or [])
+    await _mark_history(repo, url, "upload", True, title=stored.get("title"), page_id=page_id, check_name=check_name)
+    applog.success(
+        "page_upload",
+        url=url,
+        checkName=check_name,
+        source=parsed_source,
+        title=stored.get("title"),
+        pageId=page_id,
+        snapshotId=snapshot_id,
+        attachmentCount=attachment_count,
+        durationMs=int((time.perf_counter() - started) * 1000),
+    )
+    return {
+        "success": True,
+        "message": "Files uploaded",
         "pageId": page_id,
         "snapshotId": snapshot_id,
         "attachmentCount": attachment_count,

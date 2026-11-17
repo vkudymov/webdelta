@@ -29,9 +29,14 @@ export function getApiSource() {
 export async function apiFetch(path, options = {}) {
   let url = `${API_BASE}${path}`;
   const opts = { ...options };
+  const method = (opts.method || "GET").toUpperCase();
+  const isGet = method === "GET";
   if (path.startsWith("/api/pages")) {
     const joiner = path.includes("?") ? "&" : "?";
     url = `${API_BASE}${path}${joiner}source=${encodeURIComponent(currentSource)}`;
+    if (isGet) {
+      url += `&_=${Date.now()}`;
+    }
     if (typeof opts.body === "string") {
       try {
         const parsed = JSON.parse(opts.body);
@@ -46,6 +51,7 @@ export async function apiFetch(path, options = {}) {
   }
   const res = await fetch(url, {
     ...opts,
+    cache: isGet ? "no-store" : opts.cache,
     headers: { ...localApiHeaders(), ...(opts.headers || {}) },
   });
   const data = await res.json().catch(() => ({}));
